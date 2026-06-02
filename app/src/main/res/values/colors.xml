@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <color name="purple_200">#FFBB86FC</color>
+    <color name="purple_500">#FF6200EE</color>
+    <color name="purple_700">#FF3700B3</color>
+    <color name="teal_200">#FF03DAC5</color>
+    <color name="teal_700">#FF018786</color>
+    <color name="black">#FF000000</color>
+    <color name="white">#FFFFFFFF</color>
+
+    <!-- KaliDroid palette -->
+    <color name="bg_dark">#0D1117</color>
+    <color name="bg_card">#1C2128</color>
+    <color name="kali_blue">#58A6FF</color>
+    <color name="kali_blue_dark">#1F6FEB</color>
+    <color name="text_primary">#E6EDF3</color>
+    <color name="text_secondary">#8B949E</color>
+    <color name="divider">#30363D</color>
+    <color name="valid_green">#3FB950</color>
+    <color name="invalid_red">#F85149</color>
+    <color name="unknown_yellow">#D29922</color>
+
+    <!-- Launcher icon -->
+    <color name="ic_launcher_background">#1793D1</color>
+</resources>

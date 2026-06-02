@@ -1,0 +1,55 @@
+<resources>
+    <string name="app_name">KaliDroid</string>
+    <string name="subtitle">Online Installer</string>
+    <string name="logo_desc">KaliDroid logo</string>
+    <string name="btn_download">Download &amp; Setup</string>
+
+    <!-- Main screen chrome -->
+    <string name="main_chip_version">v1.0</string>
+    <string name="main_ready_label">Ready</string>
+    <string name="main_tagline">Pentesting toolkit · one-tap install</string>
+    <string name="main_footer">SECURE · ENCRYPTED · OPEN-SOURCE</string>
+
+    <!-- Dialog phases -->
+    <string name="phase_downloading">Downloading</string>
+    <string name="phase_verifying">Verifying</string>
+    <string name="phase_installing">Installing</string>
+    <string name="phase_error">Error</string>
+    <string name="phase_complete">Complete</string>
+
+    <!-- Status lines -->
+    <string name="status_connecting">Establishing secure link…</string>
+    <string name="status_downloading">Streaming package payload</string>
+    <string name="status_verifying">Validating integrity</string>
+    <string name="status_installing">Handing off to package installer</string>
+    <string name="status_complete">Ready to launch</string>
+
+    <!-- Status hints (secondary line under main status) -->
+    <string name="status_hint_connect">resolving host · negotiating tls</string>
+    <string name="status_hint_download">payload in transit · do not exit</string>
+    <string name="status_hint_verify">checking apk signature &amp; magic</string>
+    <string name="status_hint_install">launching system installer</string>
+    <string name="status_hint_error">tap cancel to dismiss</string>
+
+    <!-- Remaining time -->
+    <string name="remaining_calculating">--</string>
+    <string name="remaining_seconds">%1$ds</string>
+    <string name="remaining_minutes">%1$dm %2$ds</string>
+
+    <!-- Stat labels -->
+    <string name="label_speed">Speed</string>
+    <string name="label_size">Size</string>
+    <string name="label_eta">ETA</string>
+    <string name="live_label">Live</string>
+    <string name="offline_label">Offline</string>
+    <string name="complete_label">Complete</string>
+    <string name="dash">--</string>
+
+    <!-- Formats -->
+    <string name="percent_format">%1$d%%</string>
+    <string name="speed_format">%1$.1f MB/s</string>
+    <string name="size_format">%1$s / %2$s</string>
+
+    <!-- Misc -->
+    <string name="error_unknown">An unknown error occurred</string>
+</resources>
