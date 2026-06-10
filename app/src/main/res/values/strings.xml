@@ -5,7 +5,7 @@
     <string name="btn_download">Download &amp; Setup</string>
 
     <!-- Main screen chrome -->
-    <string name="main_chip_version">v1.1</string>
+    <string name="main_chip_version">v1.2</string>
     <string name="main_ready_label">Ready</string>
     <string name="main_tagline">Pentesting toolkit · one-tap install</string>
     <string name="main_footer">SECURE · ENCRYPTED · OPEN-SOURCE</string>
