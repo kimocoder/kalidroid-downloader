@@ -11,16 +11,4 @@
         <item name="android:navigationBarColor">@color/bg_dark</item>
     </style>
 
-    <style name="DownloadDialogTheme" parent="Theme.MaterialComponents.Dialog.Alert">
-        <item name="colorPrimary">@color/kali_blue</item>
-        <item name="colorSurface">@color/bg_card</item>
-        <item name="android:windowBackground">@android:color/transparent</item>
-        <item name="android:backgroundDimAmount">0.78</item>
-        <item name="colorOnSurface">@color/text_primary</item>
-        <item name="buttonBarNegativeButtonStyle">@style/DialogCancelButton</item>
-    </style>
-
-    <style name="DialogCancelButton" parent="Widget.MaterialComponents.Button.TextButton.Dialog">
-        <item name="android:textColor">@android:color/white</item>
-    </style>
 </resources>

