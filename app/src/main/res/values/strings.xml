@@ -5,7 +5,7 @@
     <string name="btn_download">Download &amp; Setup</string>
 
     <!-- Main screen chrome -->
-    <string name="main_chip_version">v2.2</string>
+    <string name="main_chip_version">v2.3</string>
     <string name="version_chip_format">v%1$s</string>
     <string name="main_ready_label">Ready</string>
     <string name="main_tagline">Pentesting toolkit · one-tap install</string>
@@ -28,8 +28,8 @@
     <!-- Status hints (secondary line under main status) -->
     <string name="status_hint_connect">resolving host · negotiating tls</string>
     <string name="status_hint_download">payload in transit · do not exit</string>
-    <string name="status_hint_update">new commit detected · downloading update</string>
-    <string name="status_hint_verify">checking apk signature &amp; magic</string>
+    <string name="status_hint_update">new build detected · downloading update</string>
+    <string name="status_hint_verify">verifying apk signature &amp; publisher</string>
     <string name="status_hint_install">launching system installer</string>
     <string name="status_hint_error">tap ok to dismiss</string>
 
@@ -51,6 +51,13 @@
     <string name="percent_format">%1$d%%</string>
     <string name="speed_format">%1$.1f MB/s</string>
     <string name="size_format">%1$s / %2$s</string>
+
+    <!-- Self-update prompt -->
+    <string name="update_available_title">Update available</string>
+    <string name="update_available_message">A newer KaliDroid installer (%1$s) is available. Update now?</string>
+    <string name="update_now">Update</string>
+    <string name="update_later">Later</string>
+    <string name="build_format">build %1$d</string>
 
     <!-- Misc -->
     <string name="error_unknown">An unknown error occurred</string>

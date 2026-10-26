@@ -1,7 +1,10 @@
 package com.nethunter.kalidroid
 
 import android.content.Intent
+import android.content.pm.PackageInfo
+import android.content.pm.PackageManager
 import android.net.Uri
+import android.os.Build
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
@@ -13,15 +16,18 @@ import android.widget.ImageView
 import android.widget.ProgressBar
 import android.widget.TextView
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.content.FileProvider
+import androidx.core.content.pm.PackageInfoCompat
 import com.google.android.material.button.MaterialButton
+import com.google.android.material.dialog.MaterialAlertDialogBuilder
 import com.google.android.material.progressindicator.CircularProgressIndicator
-import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
 import java.net.HttpURLConnection
 import java.net.URL
+import java.security.MessageDigest
 import java.util.Locale
 
 class MainActivity : AppCompatActivity() {
@@ -29,26 +35,65 @@ class MainActivity : AppCompatActivity() {
     companion object {
         private const val TAG = "KaliDroid"
         private const val APK_URL = "https://kalidroid.com/setup.apk"
-        private const val GITHUB_LATEST_COMMIT_URL =
-            "https://api.github.com/repos/kimocoder/kalidroid-downloader/commits/master"
-        private const val GITHUB_RELEASES_URL =
-            "https://api.github.com/repos/kimocoder/kalidroid-downloader/releases?per_page=5"
-        private const val SELF_UPDATE_APK_FALLBACK_URL =
-            "https://github.com/kimocoder/kalidroid-downloader/releases/download/latest/kalidroid.apk"
+        // Published by CI next to the rolling APK: {"versionCode", "url", "sha256", ...}
+        private const val SELF_UPDATE_MANIFEST_URL =
+            "https://github.com/kimocoder/kalidroid-downloader/releases/download/latest/version.json"
         private const val USER_AGENT = "KaliDroid-Installer"
         private const val FILE_PROVIDER_AUTHORITY = "com.nethunter.kalidroid.provider"
 
-        internal fun isNewerCommit(remoteSha: String, localSha: String): Boolean {
-            val remote = remoteSha.trim()
-            val local = localSha.trim()
-            fun isHexSha(s: String): Boolean =
-                s.length >= 7 && s.all { it.isDigit() || it.lowercaseChar() in 'a'..'f' }
+        // setup.apk must be one of these packages, signed by one of these certificates
+        // (SHA-256, as printed by `apksigner verify --print-certs`). Add a new key here
+        // and ship that installer before kalidroid.com starts serving APKs signed with it.
+        private val SETUP_PACKAGE_NAMES = setOf("com.excp.kalidroid.debug")
+        private val SETUP_SIGNER_SHA256 = setOf(
+            "30b9525c0e8f3b7d32de877cb41ff8651dabc9dbf263555b2ffd200bf1f894ee"
+        )
 
-            if (!isHexSha(remote) || !isHexSha(local)) return false
-            return !remote.startsWith(local, ignoreCase = true) &&
-                !local.startsWith(remote, ignoreCase = true)
+        // Some Android versions only collect (and verify) an archive's certificates
+        // when GET_SIGNATURES is set, so always request it alongside the newer flag.
+        @Suppress("DEPRECATION")
+        private val SIGNATURE_FLAGS = PackageManager.GET_SIGNATURES or
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) PackageManager.GET_SIGNING_CERTIFICATES else 0
+
+        /** True if any of [signers] (SHA-256 certificate digests) is in [trusted]. */
+        internal fun isSignedByAny(signers: Set<String>, trusted: Set<String>): Boolean =
+            signers.any { it in trusted }
+
+        internal fun parseUpdateInfo(json: String): UpdateInfo? {
+            val obj = runCatching { JSONObject(json) }.getOrNull() ?: return null
+            val versionCode = obj.optLong("versionCode", 0L)
+            val url = obj.optString("url", "").trim()
+            val sha256 = obj.optString("sha256", "").trim().lowercase(Locale.US)
+
+            if (versionCode <= 0L) return null
+            if (!url.startsWith("https://")) return null
+            if (sha256.length != 64 || !sha256.all { it.isDigit() || it in 'a'..'f' }) return null
+            return UpdateInfo(versionCode, url, sha256)
         }
+
+        internal fun sha256Hex(file: File): String {
+            val digest = MessageDigest.getInstance("SHA-256")
+            file.inputStream().use { input ->
+                val buf = ByteArray(65_536)
+                var read: Int
+                while (input.read(buf).also { read = it } != -1) {
+                    digest.update(buf, 0, read)
+                }
+            }
+            return digest.digest().toHex()
+        }
+
+        internal fun sha256Hex(bytes: ByteArray): String =
+            MessageDigest.getInstance("SHA-256").digest(bytes).toHex()
+
+        private fun ByteArray.toHex(): String = joinToString("") { "%02x".format(Locale.US, it) }
     }
+
+    internal data class UpdateInfo(
+        val versionCode: Long,
+        val url: String,
+        val sha256: String
+    )
 
     private val handler = Handler(Looper.getMainLooper())
     private var downloadThread: Thread? = null
@@ -58,6 +103,7 @@ class MainActivity : AppCompatActivity() {
     @Volatile
     private var downloadGeneration = 0
     private var pendingApkFile: File? = null
+    private var updateDialog: AlertDialog? = null
 
     private val unknownSourcesLauncher = registerForActivityResult(
         ActivityResultContracts.StartActivityForResult()
@@ -171,52 +217,44 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun checkForSelfUpdate() {
-        val localSha = getString(R.string.git_commit_sha).trim()
-        if (localSha.isBlank()) return
+        val localVersionCode = installedVersionCode()
 
         updateCheckThread = Thread {
             var conn: HttpURLConnection? = null
             try {
-                conn = (URL(GITHUB_LATEST_COMMIT_URL).openConnection() as HttpURLConnection).apply {
+                conn = (URL(SELF_UPDATE_MANIFEST_URL).openConnection() as HttpURLConnection).apply {
                     connectTimeout = 10_000
                     readTimeout    = 10_000
-                    setRequestProperty("Accept", "application/vnd.github+json")
                     setRequestProperty("User-Agent", USER_AGENT)
                 }
                 conn.connect()
 
                 if (Thread.currentThread().isInterrupted) return@Thread
                 if (conn.responseCode != HttpURLConnection.HTTP_OK) {
-                    Log.d(TAG, "Self-update commit check returned HTTP ${conn.responseCode}")
+                    Log.d(TAG, "Self-update manifest returned HTTP ${conn.responseCode}")
                     return@Thread
                 }
 
                 val body = conn.inputStream.bufferedReader().use { it.readText() }
                 if (Thread.currentThread().isInterrupted) return@Thread
 
-                val commitJson = JSONObject(body)
-                val remoteSha = commitJson.optString("sha", "").trim()
-                if (!isNewerCommit(remoteSha, localSha)) {
-                    Log.d(TAG, "Installer commit is up to date (sha=${localSha.take(7)})")
+                val update = parseUpdateInfo(body)
+                if (update == null) {
+                    Log.d(TAG, "Self-update manifest is invalid")
+                    return@Thread
+                }
+                if (update.versionCode <= localVersionCode) {
+                    Log.d(TAG, "Installer is up to date (build $localVersionCode)")
                     return@Thread
                 }
 
-                val updateUrl = resolveSelfUpdateApkUrl()
-                if (Thread.currentThread().isInterrupted) return@Thread
-
-                val shortSha = remoteSha.take(7)
-                Log.i(TAG, "Newer commit $shortSha found (local=${localSha.take(7)}): $updateUrl")
+                Log.i(TAG, "Newer build ${update.versionCode} found (local=$localVersionCode): ${update.url}")
                 handler.post {
                     if (!isFinishing && !isDestroyed &&
                         downloadThread?.isAlive != true &&
                         progressPanel.visibility != View.VISIBLE
                     ) {
-                        startDownload(
-                            url = updateUrl,
-                            outFileName = "kalidroid-update.apk",
-                            isSelfUpdate = true,
-                            targetVersion = shortSha
-                        )
+                        promptSelfUpdate(update)
                     }
                 }
             } catch (_: InterruptedException) {
@@ -229,40 +267,50 @@ class MainActivity : AppCompatActivity() {
         }.also { it.start() }
     }
 
-    private fun resolveSelfUpdateApkUrl(): String {
-        var conn: HttpURLConnection? = null
-        try {
-            conn = (URL(GITHUB_RELEASES_URL).openConnection() as HttpURLConnection).apply {
-                connectTimeout = 10_000
-                readTimeout    = 10_000
-                setRequestProperty("Accept", "application/vnd.github+json")
-                setRequestProperty("User-Agent", USER_AGENT)
+    private fun promptSelfUpdate(update: UpdateInfo) {
+        val targetVersion = getString(R.string.build_format, update.versionCode)
+        updateDialog?.dismiss()
+        updateDialog = MaterialAlertDialogBuilder(this)
+            .setTitle(R.string.update_available_title)
+            .setMessage(getString(R.string.update_available_message, targetVersion))
+            .setPositiveButton(R.string.update_now) { _, _ ->
+                startDownload(
+                    url = update.url,
+                    outFileName = "kalidroid-update.apk",
+                    isSelfUpdate = true,
+                    targetVersion = targetVersion,
+                    expectedSha256 = update.sha256
+                )
             }
-            conn.connect()
-            if (conn.responseCode == HttpURLConnection.HTTP_OK) {
-                val releases = JSONArray(conn.inputStream.bufferedReader().use { it.readText() })
-                for (r in 0 until releases.length()) {
-                    val release = releases.optJSONObject(r) ?: continue
-                    val assets = release.optJSONArray("assets") ?: continue
-                    for (i in 0 until assets.length()) {
-                        val asset = assets.optJSONObject(i) ?: continue
-                        val name = asset.optString("name", "")
-                        val contentType = asset.optString("content_type", "")
-                        if (name.endsWith(".apk", ignoreCase = true) ||
-                            contentType.equals("application/vnd.android.package-archive", ignoreCase = true)
-                        ) {
-                            val url = asset.optString("browser_download_url", "")
-                            if (url.isNotBlank()) return url
-                        }
-                    }
-                }
+            .setNegativeButton(R.string.update_later, null)
+            .show()
+    }
+
+    private fun installedVersionCode(): Long = runCatching {
+        PackageInfoCompat.getLongVersionCode(packageManager.getPackageInfo(packageName, 0))
+    }.getOrDefault(0L)
+
+    private fun installedSignerDigests(): Set<String> = runCatching {
+        signerDigests(packageManager.getPackageInfo(packageName, SIGNATURE_FLAGS), includeHistory = false)
+    }.getOrDefault(emptySet())
+
+    /**
+     * SHA-256 digests of the certificates [info] is signed with. With [includeHistory],
+     * also the older certificates a rotated signing key has proven it replaces.
+     */
+    @Suppress("DEPRECATION")
+    private fun signerDigests(info: PackageInfo, includeHistory: Boolean): Set<String> {
+        val signatures = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+            val signingInfo = info.signingInfo
+            when {
+                signingInfo == null -> info.signatures
+                includeHistory && !signingInfo.hasMultipleSigners() -> signingInfo.signingCertificateHistory
+                else -> signingInfo.apkContentsSigners
             }
-        } catch (e: Exception) {
-            Log.d(TAG, "Release asset lookup fell back to default URL: ${e.message}")
-        } finally {
-            conn?.disconnect()
+        } else {
+            info.signatures
         }
-        return SELF_UPDATE_APK_FALLBACK_URL
+        return signatures.orEmpty().map { sha256Hex(it.toByteArray()) }.toSet()
     }
 
     private fun getVersionChipText(): String {
@@ -300,7 +348,8 @@ class MainActivity : AppCompatActivity() {
         url: String = APK_URL,
         outFileName: String = "setup.apk",
         isSelfUpdate: Boolean = false,
-        targetVersion: String? = null
+        targetVersion: String? = null,
+        expectedSha256: String? = null
     ) {
         cancelActiveDownload()
         val generation = ++downloadGeneration
@@ -431,9 +480,44 @@ class MainActivity : AppCompatActivity() {
                     throw Exception("Downloaded file is not a valid APK ($hex)")
                 }
 
-                if (packageManager.getPackageArchiveInfo(apkFile.absolutePath, 0) == null) {
+                if (expectedSha256 != null) {
+                    val actualSha256 = sha256Hex(apkFile)
+                    if (!actualSha256.equals(expectedSha256, ignoreCase = true)) {
+                        Log.e(TAG, "SHA-256 mismatch: expected $expectedSha256, got $actualSha256")
+                        throw Exception("Downloaded APK checksum does not match")
+                    }
+                }
+
+                // Also verifies the APK signature; a tampered archive comes back null
+                val archiveInfo = packageManager.getPackageArchiveInfo(apkFile.absolutePath, SIGNATURE_FLAGS)
+                if (archiveInfo == null) {
                     Log.e(TAG, "PackageArchiveInfo check failed for ${apkFile.absolutePath}")
                     throw Exception("Downloaded APK archive is corrupted")
+                }
+                val archiveSigners = signerDigests(archiveInfo, includeHistory = true)
+
+                if (isSelfUpdate) {
+                    // Only ever install a newer build of ourselves, so a stale release
+                    // asset can never put the self-update into a reinstall loop.
+                    val archiveVersionCode = PackageInfoCompat.getLongVersionCode(archiveInfo)
+                    val localVersionCode = installedVersionCode()
+                    if (archiveInfo.packageName != packageName || archiveVersionCode <= localVersionCode) {
+                        Log.e(
+                            TAG,
+                            "Rejected update ${archiveInfo.packageName} build $archiveVersionCode " +
+                                "(installed build $localVersionCode)"
+                        )
+                        throw Exception("Downloaded update is not newer than the installed version")
+                    }
+                    if (!isSignedByAny(archiveSigners, installedSignerDigests())) {
+                        Log.e(TAG, "Rejected update signed by $archiveSigners")
+                        throw Exception("Downloaded update is not signed with the installer's key")
+                    }
+                } else if (archiveInfo.packageName !in SETUP_PACKAGE_NAMES ||
+                    !isSignedByAny(archiveSigners, SETUP_SIGNER_SHA256)
+                ) {
+                    Log.e(TAG, "Rejected ${archiveInfo.packageName} signed by $archiveSigners")
+                    throw Exception("Downloaded APK is not signed by the KaliDroid publisher")
                 }
 
                 if (downloadGeneration != generation || Thread.currentThread().isInterrupted) {
@@ -653,6 +737,8 @@ class MainActivity : AppCompatActivity() {
 
     override fun onDestroy() {
         super.onDestroy()
+        updateDialog?.dismiss()
+        updateDialog = null
         updateCheckThread?.interrupt()
         cancelActiveDownload()
     }

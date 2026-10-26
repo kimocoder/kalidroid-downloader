@@ -8,12 +8,20 @@ on:
 permissions:
   contents: write
 
+# Publish one build at a time so kalidroid.apk and version.json always match.
+concurrency:
+  group: rolling-release
+  cancel-in-progress: false
+
 jobs:
   build:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
         uses: actions/checkout@v7
+        with:
+          # Full history: versionCode is the commit count
+          fetch-depth: 0
 
       - name: Set up JDK 21
         uses: actions/setup-java@v6
@@ -24,18 +32,60 @@ jobs:
       - name: Setup Gradle
         uses: gradle/actions/setup-gradle@v5
 
+      - name: Decode release keystore
+        env:
+          KEYSTORE_BASE64: ${{ secrets.KALIDROID_KEYSTORE_BASE64 }}
+        run: |
+          if [ -z "$KEYSTORE_BASE64" ]; then
+            echo "::error::KALIDROID_KEYSTORE_BASE64 secret is not set; refusing to publish an unsigned build"
+            exit 1
+          fi
+          echo "$KEYSTORE_BASE64" | base64 -d > "$RUNNER_TEMP/release.jks"
+          echo "KALIDROID_KEYSTORE_FILE=$RUNNER_TEMP/release.jks" >> "$GITHUB_ENV"
+
       - name: Build APK
-        run: ./gradlew assembleDebug
+        env:
+          KALIDROID_KEYSTORE_PASSWORD: ${{ secrets.KALIDROID_KEYSTORE_PASSWORD }}
+          KALIDROID_KEY_ALIAS: ${{ secrets.KALIDROID_KEY_ALIAS }}
+          KALIDROID_KEY_PASSWORD: ${{ secrets.KALIDROID_KEY_PASSWORD }}
+        run: ./gradlew assembleRelease
+
+      - name: Write update manifest
+        run: |
+          cp app/build/outputs/apk/release/app-release.apk kalidroid.apk
+          BUILD_TOOLS=$(ls -d "$ANDROID_HOME"/build-tools/* | sort -V | tail -1)
+          "$BUILD_TOOLS/apksigner" verify --print-certs kalidroid.apk
+          BADGING=$("$BUILD_TOOLS/aapt2" dump badging kalidroid.apk)
+          VERSION_CODE=$(echo "$BADGING" | sed -n "/^package:/s/.* versionCode='\([0-9]*\)'.*/\1/p")
+          VERSION_NAME=$(echo "$BADGING" | sed -n "/^package:/s/.* versionName='\([^']*\)'.*/\1/p")
+          if [ -z "$VERSION_CODE" ]; then
+            echo "::error::Could not read versionCode from kalidroid.apk"
+            exit 1
+          fi
+          jq -n \
+            --argjson versionCode "$VERSION_CODE" \
+            --arg versionName "$VERSION_NAME" \
+            --arg commit "${{ github.sha }}" \
+            --arg sha256 "$(sha256sum kalidroid.apk | cut -d' ' -f1)" \
+            --argjson size "$(stat -c %s kalidroid.apk)" \
+            --arg url "https://github.com/${{ github.repository }}/releases/download/latest/kalidroid.apk" \
+            '{versionCode: $versionCode, versionName: $versionName, commit: $commit, sha256: $sha256, size: $size, url: $url}' \
+            > version.json
+          cat version.json
+          echo "VERSION_CODE=$VERSION_CODE" >> "$GITHUB_ENV"
 
       - name: Publish rolling release APK
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          cp app/build/outputs/apk/debug/app-debug.apk kalidroid.apk
           SHORT_SHA=$(git rev-parse --short HEAD)
+          TITLE="Latest Build $VERSION_CODE ($SHORT_SHA)"
+          NOTES="Automated build $VERSION_CODE from commit ${{ github.sha }}"
           if gh release view latest >/dev/null 2>&1; then
+            # APK first, manifest second: clients only see the new manifest once its APK is live
             gh release upload latest kalidroid.apk --clobber
-            gh release edit latest --title "Latest Build ($SHORT_SHA)" --notes "Automated build from commit ${{ github.sha }}" --target "${{ github.sha }}"
+            gh release upload latest version.json --clobber
+            gh release edit latest --title "$TITLE" --notes "$NOTES" --target "${{ github.sha }}"
           else
-            gh release create latest kalidroid.apk --title "Latest Build ($SHORT_SHA)" --notes "Automated build from commit ${{ github.sha }}" --target "${{ github.sha }}"
+            gh release create latest kalidroid.apk version.json --title "$TITLE" --notes "$NOTES" --target "${{ github.sha }}"
           fi
