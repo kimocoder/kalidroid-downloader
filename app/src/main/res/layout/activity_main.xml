@@ -3,6 +3,7 @@
     xmlns:app="http://schemas.android.com/apk/res-auto"
     android:layout_width="match_parent"
     android:layout_height="match_parent"
+    android:fillViewport="true"
     android:background="@color/bg_dark">
 
     <!-- Main card panel -->
@@ -321,7 +322,7 @@
                 android:fontFamily="monospace"
                 android:layout_marginStart="20dp"
                 android:layout_marginEnd="20dp"
-                android:singleLine="true"
+                android:maxLines="3"
                 android:ellipsize="end"
                 android:text="@string/status_connecting" />
 

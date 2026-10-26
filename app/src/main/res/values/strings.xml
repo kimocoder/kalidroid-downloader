@@ -5,7 +5,7 @@
     <string name="btn_download">Download &amp; Setup</string>
 
     <!-- Main screen chrome -->
-    <string name="main_chip_version">v2.0</string>
+    <string name="main_chip_version">v2.1</string>
     <string name="version_chip_format">v%1$s</string>
     <string name="main_ready_label">Ready</string>
     <string name="main_tagline">Pentesting toolkit · one-tap install</string>

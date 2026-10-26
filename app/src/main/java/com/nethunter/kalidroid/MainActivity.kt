@@ -53,6 +53,10 @@ class MainActivity : AppCompatActivity() {
     private val handler = Handler(Looper.getMainLooper())
     private var downloadThread: Thread? = null
     private var updateCheckThread: Thread? = null
+    @Volatile
+    private var activeConnection: HttpURLConnection? = null
+    @Volatile
+    private var downloadGeneration = 0
     private var pendingApkFile: File? = null
 
     private val unknownSourcesLauncher = registerForActivityResult(
@@ -75,6 +79,12 @@ class MainActivity : AppCompatActivity() {
     private lateinit var idlePanel: View
     private lateinit var progressPanel: View
 
+    // Decorative ring views
+    private lateinit var ivMainRingScanner: ImageView
+    private lateinit var ivMainRingDashed: ImageView
+    private lateinit var ivRingScanner: ImageView
+    private lateinit var ivRingDashed: ImageView
+
     // Progress views
     private lateinit var tvStatus: TextView
     private lateinit var tvStatusHint: TextView
@@ -90,11 +100,15 @@ class MainActivity : AppCompatActivity() {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_main)
 
+        // Decorative ring views
+        ivMainRingScanner = findViewById(R.id.ivMainRingScanner)
+        ivMainRingDashed  = findViewById(R.id.ivMainRingDashed)
+        ivRingScanner     = findViewById(R.id.ivRingScanner)
+        ivRingDashed      = findViewById(R.id.ivRingDashed)
+
         // Idle decorative animations
-        findViewById<ImageView>(R.id.ivMainRingScanner)
-            .startAnimation(AnimationUtils.loadAnimation(this, R.anim.rotate_cw))
-        findViewById<ImageView>(R.id.ivMainRingDashed)
-            .startAnimation(AnimationUtils.loadAnimation(this, R.anim.rotate_ccw))
+        ivMainRingScanner.startAnimation(AnimationUtils.loadAnimation(this, R.anim.rotate_cw))
+        ivMainRingDashed.startAnimation(AnimationUtils.loadAnimation(this, R.anim.rotate_ccw))
         mainStatusDot = findViewById(R.id.mainStatusDot)
         mainStatusDot.startAnimation(AnimationUtils.loadAnimation(this, R.anim.blink))
 
@@ -127,11 +141,33 @@ class MainActivity : AppCompatActivity() {
         }
 
         btnCancel.setOnClickListener {
-            downloadThread?.interrupt()
+            cancelActiveDownload()
             showIdlePanel()
         }
 
         checkForSelfUpdate()
+    }
+
+    private fun cancelActiveDownload() {
+        downloadGeneration++
+        handler.removeCallbacksAndMessages(null)
+        downloadThread?.interrupt()
+        downloadThread = null
+        val conn = activeConnection
+        activeConnection = null
+        if (conn != null) {
+            Thread {
+                runCatching { conn.disconnect() }
+            }.start()
+        }
+    }
+
+    private fun postForDownload(generation: Int, action: () -> Unit) {
+        handler.post {
+            if (downloadGeneration == generation && !isFinishing && !isDestroyed) {
+                action()
+            }
+        }
     }
 
     private fun checkForSelfUpdate() {
@@ -241,8 +277,12 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun showIdlePanel() {
+        ivRingScanner.clearAnimation()
+        ivRingDashed.clearAnimation()
         progressPanel.visibility = View.GONE
         idlePanel.visibility = View.VISIBLE
+        ivMainRingScanner.startAnimation(AnimationUtils.loadAnimation(this, R.anim.rotate_cw))
+        ivMainRingDashed.startAnimation(AnimationUtils.loadAnimation(this, R.anim.rotate_ccw))
         // Reset header back to its ready/online state
         ivPhaseIcon.setImageResource(R.drawable.ic_package)
         tvPhase.text = getVersionChipText()
@@ -262,17 +302,22 @@ class MainActivity : AppCompatActivity() {
         isSelfUpdate: Boolean = false,
         targetVersion: String? = null
     ) {
+        cancelActiveDownload()
+        val generation = ++downloadGeneration
+
         // Swap to the progress panel
+        ivMainRingScanner.clearAnimation()
+        ivMainRingDashed.clearAnimation()
         idlePanel.visibility = View.GONE
         progressPanel.visibility = View.VISIBLE
 
         // Decorative animations for the progress rings + dot
-        findViewById<ImageView>(R.id.ivRingScanner)
-            .startAnimation(AnimationUtils.loadAnimation(this, R.anim.rotate_cw))
-        findViewById<ImageView>(R.id.ivRingDashed)
-            .startAnimation(AnimationUtils.loadAnimation(this, R.anim.rotate_ccw))
+        ivRingScanner.startAnimation(AnimationUtils.loadAnimation(this, R.anim.rotate_cw))
+        ivRingDashed.startAnimation(AnimationUtils.loadAnimation(this, R.anim.rotate_ccw))
 
         // Reset state
+        progressBar.isIndeterminate = false
+        circular.isIndeterminate = false
         circular.setProgressCompat(0, false)
         progressBar.progress = 0
         tvPercent.text   = getString(R.string.percent_format, 0)
@@ -304,27 +349,39 @@ class MainActivity : AppCompatActivity() {
         )
 
         downloadThread = Thread {
+            var downloadedFile: File? = null
             try {
                 val apkFile = downloadApk(
                     downloadUrl = url,
                     outFileName = outFileName,
                     onProgress = { percent, downloadedBytes, totalBytes, speedMbps, remainingSecs ->
-                        handler.post {
-                            val scaled = (percent * 10).coerceIn(0, 1000)
-                            progressBar.progress = scaled
-                            circular.setProgressCompat(scaled, true)
-                            tvPercent.text = getString(R.string.percent_format, percent)
-                            tvSpeed.text   = getString(R.string.speed_format, speedMbps)
-                            tvSize.text    = getString(
-                                R.string.size_format,
-                                formatBytes(downloadedBytes),
-                                formatBytes(totalBytes)
-                            )
+                        postForDownload(generation) {
+                            if (percent >= 0) {
+                                progressBar.isIndeterminate = false
+                                circular.isIndeterminate = false
+                                val scaled = (percent * 10).coerceIn(0, 1000)
+                                progressBar.progress = scaled
+                                circular.setProgressCompat(scaled, true)
+                                tvPercent.text = getString(R.string.percent_format, percent)
+                            } else {
+                                progressBar.isIndeterminate = true
+                                tvPercent.text = getString(R.string.dash)
+                            }
+                            tvSpeed.text = getString(R.string.speed_format, speedMbps)
+                            tvSize.text = if (totalBytes > 0) {
+                                getString(
+                                    R.string.size_format,
+                                    formatBytes(downloadedBytes),
+                                    formatBytes(totalBytes)
+                                )
+                            } else {
+                                formatBytes(downloadedBytes)
+                            }
                             tvRemaining.text = formatRemaining(remainingSecs)
                         }
                     },
                     onConnected = { totalBytes ->
-                        handler.post {
+                        postForDownload(generation) {
                             tvStatus.text = if (isSelfUpdate && !targetVersion.isNullOrBlank()) {
                                 getString(R.string.status_updating, targetVersion)
                             } else {
@@ -333,20 +390,23 @@ class MainActivity : AppCompatActivity() {
                             tvStatusHint.text = getString(
                                 if (isSelfUpdate) R.string.status_hint_update else R.string.status_hint_download
                             )
-                            if (totalBytes > 0) {
-                                tvSize.text = getString(
+                            tvSize.text = if (totalBytes > 0) {
+                                getString(
                                     R.string.size_format,
                                     formatBytes(0L),
                                     formatBytes(totalBytes)
                                 )
+                            } else {
+                                formatBytes(0L)
                             }
                         }
                     }
                 )
+                downloadedFile = apkFile
 
                 Log.d(TAG, "Downloaded: ${apkFile.absolutePath} (${apkFile.length()} B)")
 
-                handler.post {
+                postForDownload(generation) {
                     ivPhaseIcon.setImageResource(R.drawable.ic_package)
                     tvPhase.text      = getString(R.string.phase_verifying)
                     tvStatus.text     = getString(R.string.status_verifying)
@@ -356,17 +416,37 @@ class MainActivity : AppCompatActivity() {
                 // Validate ZIP/APK magic: PK\x03\x04
                 val magic = ByteArray(4)
                 val magicRead = apkFile.inputStream().use { it.read(magic) }
-                if (magicRead < 4 || magic[0] != 0x50.toByte() || magic[1] != 0x4B.toByte()) {
-                    val hex = magic.take(magicRead).joinToString(" ") { "%02X".format(it) }
+                if (magicRead < 4 ||
+                    magic[0] != 0x50.toByte() ||
+                    magic[1] != 0x4B.toByte() ||
+                    magic[2] != 0x03.toByte() ||
+                    magic[3] != 0x04.toByte()
+                ) {
+                    val hex = if (magicRead > 0) {
+                        magic.take(magicRead).joinToString(" ") { "%02X".format(it) }
+                    } else {
+                        "empty"
+                    }
                     Log.e(TAG, "Not a valid APK: $hex")
                     throw Exception("Downloaded file is not a valid APK ($hex)")
                 }
 
-                handler.post {
+                if (downloadGeneration != generation || Thread.currentThread().isInterrupted) {
+                    throw InterruptedException()
+                }
+
+                postForDownload(generation) {
+                    progressBar.isIndeterminate = false
+                    circular.isIndeterminate = false
                     progressBar.progress = 1000
                     circular.setProgressCompat(1000, true)
                     tvPercent.text  = getString(R.string.percent_format, 100)
                     tvSpeed.text    = getString(R.string.dash)
+                    tvSize.text     = getString(
+                        R.string.size_format,
+                        formatBytes(apkFile.length()),
+                        formatBytes(apkFile.length())
+                    )
                     tvRemaining.text = getString(R.string.dash)
                     tvPhase.text    = getString(R.string.phase_installing)
                     tvStatus.text   = getString(R.string.status_installing)
@@ -374,15 +454,22 @@ class MainActivity : AppCompatActivity() {
                 }
 
                 Thread.sleep(700)
-                handler.post {
+                if (downloadGeneration != generation || Thread.currentThread().isInterrupted) {
+                    throw InterruptedException()
+                }
+                postForDownload(generation) {
                     showIdlePanel()
                     installApk(apkFile)
                 }
 
             } catch (_: InterruptedException) {
-                // user cancelled
+                downloadedFile?.delete()
             } catch (e: Exception) {
-                handler.post {
+                downloadedFile?.delete()
+                if (downloadGeneration != generation || Thread.currentThread().isInterrupted) return@Thread
+                postForDownload(generation) {
+                    ivRingScanner.clearAnimation()
+                    ivRingDashed.clearAnimation()
                     mainStatusDot.clearAnimation()
                     mainStatusDot.alpha = 1f
                     mainStatusDot.setBackgroundResource(R.drawable.status_dot)
@@ -412,57 +499,80 @@ class MainActivity : AppCompatActivity() {
         onConnected: (totalBytes: Long) -> Unit
     ): File {
         val conn = URL(downloadUrl).openConnection() as HttpURLConnection
-        conn.instanceFollowRedirects = true
-        conn.connectTimeout = 15_000
-        conn.readTimeout    = 30_000
-        conn.setRequestProperty("User-Agent", USER_AGENT)
-        conn.connect()
+        activeConnection = conn
+        val tempFile = File.createTempFile("$outFileName.", ".tmp", cacheDir)
+        try {
+            conn.instanceFollowRedirects = true
+            conn.connectTimeout = 15_000
+            conn.readTimeout    = 30_000
+            conn.setRequestProperty("User-Agent", USER_AGENT)
+            conn.connect()
 
-        val responseCode = conn.responseCode
-        if (responseCode != HttpURLConnection.HTTP_OK) {
-            throw Exception("Server returned HTTP $responseCode")
-        }
+            if (Thread.currentThread().isInterrupted) throw InterruptedException()
 
-        val contentLength = conn.contentLengthLong
-        onConnected(contentLength)
+            val responseCode = conn.responseCode
+            if (responseCode != HttpURLConnection.HTTP_OK) {
+                throw Exception("Server returned HTTP $responseCode")
+            }
 
-        val outFile = File(cacheDir, outFileName)
+            val contentLength = conn.contentLengthLong
+            onConnected(contentLength)
 
-        conn.inputStream.use { input ->
-            outFile.outputStream().use { output ->
-                val buf = ByteArray(65_536)
-                var downloaded = 0L
-                var read: Int
-                val startTime = System.currentTimeMillis()
-                var lastTime  = startTime
-                var lastBytes = 0L
+            conn.inputStream.use { input ->
+                tempFile.outputStream().use { output ->
+                    val buf = ByteArray(65_536)
+                    var downloaded = 0L
+                    var read: Int
+                    val startTime = System.currentTimeMillis()
+                    var lastTime  = startTime
+                    var lastBytes = 0L
 
-                while (input.read(buf).also { read = it } != -1) {
-                    if (Thread.currentThread().isInterrupted) throw InterruptedException()
-                    output.write(buf, 0, read)
-                    downloaded += read
+                    while (input.read(buf).also { read = it } != -1) {
+                        if (Thread.currentThread().isInterrupted) throw InterruptedException()
+                        output.write(buf, 0, read)
+                        downloaded += read
 
-                    val now = System.currentTimeMillis()
-                    if (now - lastTime >= 250) {
-                        val intervalBytes = downloaded - lastBytes
-                        val intervalMs = (now - lastTime).coerceAtLeast(1)
-                        val speedBps = intervalBytes * 1000.0 / intervalMs
-                        val speedMbps = speedBps / (1024.0 * 1024.0)
+                        val now = System.currentTimeMillis()
+                        if (now - lastTime >= 250) {
+                            val intervalBytes = downloaded - lastBytes
+                            val intervalMs = (now - lastTime).coerceAtLeast(1)
+                            val speedBps = intervalBytes * 1000.0 / intervalMs
+                            val speedMbps = speedBps / (1024.0 * 1024.0)
 
-                        val percent = if (contentLength > 0) (downloaded * 100 / contentLength).toInt() else -1
-                        val remaining = if (contentLength > 0 && speedBps > 0)
-                            ((contentLength - downloaded) / speedBps).toLong() else -1L
+                            val percent = if (contentLength > 0) {
+                                (downloaded * 100 / contentLength).toInt().coerceIn(0, 99)
+                            } else {
+                                -1
+                            }
+                            val remaining = if (contentLength > 0 && speedBps > 0)
+                                ((contentLength - downloaded) / speedBps).toLong() else -1L
 
-                        if (percent >= 0) {
-                            onProgress(percent.coerceIn(0, 99), downloaded, contentLength, speedMbps, remaining)
+                            onProgress(percent, downloaded, contentLength, speedMbps, remaining)
+                            lastTime  = now
+                            lastBytes = downloaded
                         }
-                        lastTime  = now
-                        lastBytes = downloaded
                     }
                 }
             }
+
+            if (Thread.currentThread().isInterrupted) throw InterruptedException()
+
+            val outFile = File(cacheDir, outFileName)
+            if (outFile.exists()) outFile.delete()
+            if (!tempFile.renameTo(outFile)) {
+                tempFile.copyTo(outFile, overwrite = true)
+                tempFile.delete()
+            }
+            return outFile
+        } finally {
+            if (tempFile.exists()) {
+                tempFile.delete()
+            }
+            if (activeConnection === conn) {
+                activeConnection = null
+            }
+            runCatching { conn.disconnect() }
         }
-        return outFile
     }
 
     private fun installApk(file: File) {
@@ -515,6 +625,6 @@ class MainActivity : AppCompatActivity() {
     override fun onDestroy() {
         super.onDestroy()
         updateCheckThread?.interrupt()
-        downloadThread?.interrupt()
+        cancelActiveDownload()
     }
 }
