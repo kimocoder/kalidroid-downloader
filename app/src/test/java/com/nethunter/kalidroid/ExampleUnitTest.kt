@@ -80,6 +80,33 @@ class ExampleUnitTest {
     }
 
     @Test
+    fun bytesNeeded_coversRemainingDownloadPlusCopy() {
+        val mb = 1024L * 1024
+        val margin = 64 * mb
+        // Nothing downloaded yet: DownloadManager's file and our copy
+        assertEquals(343 * mb * 2 + margin, MainActivity.bytesNeeded(343 * mb, 0))
+        // Half done: only the rest of the download is still to come
+        assertEquals(100 * mb + 200 * mb + margin, MainActivity.bytesNeeded(200 * mb, 100 * mb))
+        // DownloadManager over-reporting never makes the remainder negative
+        assertEquals(10 * mb + margin, MainActivity.bytesNeeded(10 * mb, 12 * mb))
+    }
+
+    @Test
+    fun isUpdateSnoozed_hidesThatBuildForADay() {
+        val day = 24 * 60 * 60 * 1000L
+        val laterAt = 1_000_000_000L
+
+        assertTrue(MainActivity.isUpdateSnoozed(57, 57, laterAt, laterAt + day - 1))
+        assertTrue(MainActivity.isUpdateSnoozed(56, 57, laterAt, laterAt + 1))
+        // A newer build than the one put off, or after a day, prompts again
+        assertFalse(MainActivity.isUpdateSnoozed(58, 57, laterAt, laterAt + 1))
+        assertFalse(MainActivity.isUpdateSnoozed(57, 57, laterAt, laterAt + day))
+        // Never snoozed, or the clock went backwards
+        assertFalse(MainActivity.isUpdateSnoozed(57, 0, 0, laterAt))
+        assertFalse(MainActivity.isUpdateSnoozed(57, 57, laterAt, laterAt - 1))
+    }
+
+    @Test
     fun sha256Hex_hashesFileContents() {
         val file = File.createTempFile("sha256", ".bin")
         try {

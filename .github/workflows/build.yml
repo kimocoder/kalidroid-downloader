@@ -48,7 +48,7 @@ jobs:
           KALIDROID_KEYSTORE_PASSWORD: ${{ secrets.KALIDROID_KEYSTORE_PASSWORD }}
           KALIDROID_KEY_ALIAS: ${{ secrets.KALIDROID_KEY_ALIAS }}
           KALIDROID_KEY_PASSWORD: ${{ secrets.KALIDROID_KEY_PASSWORD }}
-        run: ./gradlew assembleRelease
+        run: ./gradlew testDebugUnitTest assembleRelease
 
       - name: Write update manifest
         run: |
@@ -85,7 +85,9 @@ jobs:
             # APK first, manifest second: clients only see the new manifest once its APK is live
             gh release upload latest kalidroid.apk --clobber
             gh release upload latest version.json --clobber
-            gh release edit latest --title "$TITLE" --notes "$NOTES" --target "${{ github.sha }}"
+            # --target only applies when a tag is created, so move the rolling tag explicitly
+            gh api -X PATCH "repos/${{ github.repository }}/git/refs/tags/latest" -f sha="${{ github.sha }}" -F force=true
+            gh release edit latest --title "$TITLE" --notes "$NOTES"
           else
             gh release create latest kalidroid.apk version.json --title "$TITLE" --notes "$NOTES" --target "${{ github.sha }}"
           fi
