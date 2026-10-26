@@ -431,6 +431,11 @@ class MainActivity : AppCompatActivity() {
                     throw Exception("Downloaded file is not a valid APK ($hex)")
                 }
 
+                if (packageManager.getPackageArchiveInfo(apkFile.absolutePath, 0) == null) {
+                    Log.e(TAG, "PackageArchiveInfo check failed for ${apkFile.absolutePath}")
+                    throw Exception("Downloaded APK archive is corrupted")
+                }
+
                 if (downloadGeneration != generation || Thread.currentThread().isInterrupted) {
                     throw InterruptedException()
                 }
@@ -468,28 +473,36 @@ class MainActivity : AppCompatActivity() {
                 downloadedFile?.delete()
                 if (downloadGeneration != generation || Thread.currentThread().isInterrupted) return@Thread
                 postForDownload(generation) {
-                    ivRingScanner.clearAnimation()
-                    ivRingDashed.clearAnimation()
-                    mainStatusDot.clearAnimation()
-                    mainStatusDot.alpha = 1f
-                    mainStatusDot.setBackgroundResource(R.drawable.status_dot)
-                    mainStatusDot.backgroundTintList = android.content.res.ColorStateList.valueOf(
-                        getColor(R.color.invalid_red)
-                    )
-                    tvLive.text = getString(R.string.offline_label)
-                    tvLive.setTextColor(getColor(R.color.invalid_red))
-                    ivPhaseIcon.setImageResource(R.drawable.ic_package)
-                    tvPhase.text       = getString(R.string.phase_error)
-                    tvPhase.setTextColor(getColor(R.color.invalid_red))
-                    tvStatus.text      = e.message ?: getString(R.string.error_unknown)
-                    tvStatusHint.text  = getString(R.string.status_hint_error)
-                    tvSpeed.text       = getString(R.string.dash)
-                    tvRemaining.text   = getString(R.string.dash)
-                    btnCancel.text     = getString(android.R.string.ok)
+                    showErrorState(e.message)
                 }
             }
         }
         downloadThread?.start()
+    }
+
+    private fun showErrorState(message: String?) {
+        ivMainRingScanner.clearAnimation()
+        ivMainRingDashed.clearAnimation()
+        idlePanel.visibility = View.GONE
+        progressPanel.visibility = View.VISIBLE
+        ivRingScanner.clearAnimation()
+        ivRingDashed.clearAnimation()
+        mainStatusDot.clearAnimation()
+        mainStatusDot.alpha = 1f
+        mainStatusDot.setBackgroundResource(R.drawable.status_dot)
+        mainStatusDot.backgroundTintList = android.content.res.ColorStateList.valueOf(
+            getColor(R.color.invalid_red)
+        )
+        tvLive.text = getString(R.string.offline_label)
+        tvLive.setTextColor(getColor(R.color.invalid_red))
+        ivPhaseIcon.setImageResource(R.drawable.ic_package)
+        tvPhase.text       = getString(R.string.phase_error)
+        tvPhase.setTextColor(getColor(R.color.invalid_red))
+        tvStatus.text      = message ?: getString(R.string.error_unknown)
+        tvStatusHint.text  = getString(R.string.status_hint_error)
+        tvSpeed.text       = getString(R.string.dash)
+        tvRemaining.text   = getString(R.string.dash)
+        btnCancel.text     = getString(android.R.string.ok)
     }
 
     private fun downloadApk(
@@ -552,6 +565,12 @@ class MainActivity : AppCompatActivity() {
                             lastBytes = downloaded
                         }
                     }
+
+                    if (contentLength > 0 && downloaded != contentLength) {
+                        throw Exception(
+                            "Download incomplete (${formatBytes(downloaded)} / ${formatBytes(contentLength)})"
+                        )
+                    }
                 }
             }
 
@@ -576,27 +595,37 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun installApk(file: File) {
-        if (!packageManager.canRequestPackageInstalls()) {
-            pendingApkFile = file
-            val settingsIntent = Intent(
-                Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES,
-                Uri.fromParts("package", packageName, null)
-            )
-            unknownSourcesLauncher.launch(settingsIntent)
-            return
+        try {
+            if (!packageManager.canRequestPackageInstalls()) {
+                pendingApkFile = file
+                val settingsIntent = Intent(
+                    Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES,
+                    Uri.fromParts("package", packageName, null)
+                )
+                unknownSourcesLauncher.launch(settingsIntent)
+                return
+            }
+            launchPackageInstaller(file)
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to initiate APK install", e)
+            showErrorState(e.message)
         }
-        launchPackageInstaller(file)
     }
 
     private fun launchPackageInstaller(file: File) {
-        val uri = FileProvider.getUriForFile(this, FILE_PROVIDER_AUTHORITY, file)
-        startActivity(
-            Intent(Intent.ACTION_VIEW).apply {
-                setDataAndType(uri, "application/vnd.android.package-archive")
-                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
-                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-            }
-        )
+        try {
+            val uri = FileProvider.getUriForFile(this, FILE_PROVIDER_AUTHORITY, file)
+            startActivity(
+                Intent(Intent.ACTION_VIEW).apply {
+                    setDataAndType(uri, "application/vnd.android.package-archive")
+                    addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                    addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                }
+            )
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to launch package installer", e)
+            showErrorState(e.message)
+        }
     }
 
     private fun formatBytes(bytes: Long): String {

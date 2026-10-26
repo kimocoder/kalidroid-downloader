@@ -5,7 +5,7 @@
     <string name="btn_download">Download &amp; Setup</string>
 
     <!-- Main screen chrome -->
-    <string name="main_chip_version">v2.1</string>
+    <string name="main_chip_version">v2.2</string>
     <string name="version_chip_format">v%1$s</string>
     <string name="main_ready_label">Ready</string>
     <string name="main_tagline">Pentesting toolkit · one-tap install</string>
@@ -17,7 +17,6 @@
     <string name="phase_verifying">Verifying</string>
     <string name="phase_installing">Installing</string>
     <string name="phase_error">Error</string>
-    <string name="phase_complete">Complete</string>
 
     <!-- Status lines -->
     <string name="status_connecting">Establishing secure link…</string>
@@ -25,7 +24,6 @@
     <string name="status_updating">Updating installer to %1$s…</string>
     <string name="status_verifying">Validating integrity</string>
     <string name="status_installing">Handing off to package installer</string>
-    <string name="status_complete">Ready to launch</string>
 
     <!-- Status hints (secondary line under main status) -->
     <string name="status_hint_connect">resolving host · negotiating tls</string>
