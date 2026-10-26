@@ -2,6 +2,10 @@ plugins {
     alias(libs.plugins.android.application)
 }
 
+val gitCommitSha = providers.exec {
+    commandLine("git", "rev-parse", "HEAD")
+}.standardOutput.asText.map { it.trim() }.getOrElse("")
+
 android {
     namespace = "com.nethunter.kalidroid"
     compileSdk {
@@ -15,6 +19,8 @@ android {
         versionCode = 2
         versionName = "2.0"
 
+        resValue("string", "git_commit_sha", gitCommitSha)
+
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
 
@@ -25,6 +31,10 @@ android {
             }
         }
     }
+    buildFeatures {
+        resValues = true
+    }
+
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_11
         targetCompatibility = JavaVersion.VERSION_11

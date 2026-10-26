@@ -1,19 +1,24 @@
 package com.nethunter.kalidroid
 
 import android.content.Intent
+import android.net.Uri
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
+import android.provider.Settings
 import android.util.Log
 import android.view.View
 import android.view.animation.AnimationUtils
 import android.widget.ImageView
 import android.widget.ProgressBar
 import android.widget.TextView
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.content.FileProvider
 import com.google.android.material.button.MaterialButton
 import com.google.android.material.progressindicator.CircularProgressIndicator
+import org.json.JSONArray
+import org.json.JSONObject
 import java.io.File
 import java.net.HttpURLConnection
 import java.net.URL
@@ -24,11 +29,41 @@ class MainActivity : AppCompatActivity() {
     companion object {
         private const val TAG = "KaliDroid"
         private const val APK_URL = "https://kalidroid.com/setup.apk"
+        private const val GITHUB_LATEST_COMMIT_URL =
+            "https://api.github.com/repos/kimocoder/kalidroid-downloader/commits/master"
+        private const val GITHUB_RELEASES_URL =
+            "https://api.github.com/repos/kimocoder/kalidroid-downloader/releases?per_page=5"
+        private const val SELF_UPDATE_APK_FALLBACK_URL =
+            "https://github.com/kimocoder/kalidroid-downloader/releases/download/latest/kalidroid.apk"
+        private const val USER_AGENT = "KaliDroid-Installer"
         private const val FILE_PROVIDER_AUTHORITY = "com.nethunter.kalidroid.provider"
+
+        internal fun isNewerCommit(remoteSha: String, localSha: String): Boolean {
+            val remote = remoteSha.trim()
+            val local = localSha.trim()
+            fun isHexSha(s: String): Boolean =
+                s.length >= 7 && s.all { it.isDigit() || it.lowercaseChar() in 'a'..'f' }
+
+            if (!isHexSha(remote) || !isHexSha(local)) return false
+            return !remote.startsWith(local, ignoreCase = true) &&
+                !local.startsWith(remote, ignoreCase = true)
+        }
     }
 
     private val handler = Handler(Looper.getMainLooper())
     private var downloadThread: Thread? = null
+    private var updateCheckThread: Thread? = null
+    private var pendingApkFile: File? = null
+
+    private val unknownSourcesLauncher = registerForActivityResult(
+        ActivityResultContracts.StartActivityForResult()
+    ) {
+        val file = pendingApkFile
+        pendingApkFile = null
+        if (file != null && file.exists() && packageManager.canRequestPackageInstalls()) {
+            launchPackageInstaller(file)
+        }
+    }
 
     // Header
     private lateinit var ivPhaseIcon: ImageView
@@ -67,6 +102,7 @@ class MainActivity : AppCompatActivity() {
         ivPhaseIcon = findViewById(R.id.ivPhaseIcon)
         tvPhase     = findViewById(R.id.tvPhase)
         tvLive      = findViewById(R.id.tvLive)
+        tvPhase.text = getVersionChipText()
 
         // Panels
         idlePanel     = findViewById(R.id.idlePanel)
@@ -86,12 +122,121 @@ class MainActivity : AppCompatActivity() {
         circular.max = 1000
 
         findViewById<MaterialButton>(R.id.btnDownload).setOnClickListener {
+            updateCheckThread?.interrupt()
             startDownload()
         }
 
         btnCancel.setOnClickListener {
             downloadThread?.interrupt()
             showIdlePanel()
+        }
+
+        checkForSelfUpdate()
+    }
+
+    private fun checkForSelfUpdate() {
+        val localSha = getString(R.string.git_commit_sha).trim()
+        if (localSha.isBlank()) return
+
+        updateCheckThread = Thread {
+            var conn: HttpURLConnection? = null
+            try {
+                conn = (URL(GITHUB_LATEST_COMMIT_URL).openConnection() as HttpURLConnection).apply {
+                    connectTimeout = 10_000
+                    readTimeout    = 10_000
+                    setRequestProperty("Accept", "application/vnd.github+json")
+                    setRequestProperty("User-Agent", USER_AGENT)
+                }
+                conn.connect()
+
+                if (Thread.currentThread().isInterrupted) return@Thread
+                if (conn.responseCode != HttpURLConnection.HTTP_OK) {
+                    Log.d(TAG, "Self-update commit check returned HTTP ${conn.responseCode}")
+                    return@Thread
+                }
+
+                val body = conn.inputStream.bufferedReader().use { it.readText() }
+                if (Thread.currentThread().isInterrupted) return@Thread
+
+                val commitJson = JSONObject(body)
+                val remoteSha = commitJson.optString("sha", "").trim()
+                if (!isNewerCommit(remoteSha, localSha)) {
+                    Log.d(TAG, "Installer commit is up to date (sha=${localSha.take(7)})")
+                    return@Thread
+                }
+
+                val updateUrl = resolveSelfUpdateApkUrl()
+                if (Thread.currentThread().isInterrupted) return@Thread
+
+                val shortSha = remoteSha.take(7)
+                Log.i(TAG, "Newer commit $shortSha found (local=${localSha.take(7)}): $updateUrl")
+                handler.post {
+                    if (!isFinishing && !isDestroyed &&
+                        downloadThread?.isAlive != true &&
+                        progressPanel.visibility != View.VISIBLE
+                    ) {
+                        startDownload(
+                            url = updateUrl,
+                            outFileName = "kalidroid-update.apk",
+                            isSelfUpdate = true,
+                            targetVersion = shortSha
+                        )
+                    }
+                }
+            } catch (_: InterruptedException) {
+                // superseded by user action or lifecycle teardown
+            } catch (e: Exception) {
+                Log.d(TAG, "Self-update check skipped: ${e.message}")
+            } finally {
+                conn?.disconnect()
+            }
+        }.also { it.start() }
+    }
+
+    private fun resolveSelfUpdateApkUrl(): String {
+        var conn: HttpURLConnection? = null
+        try {
+            conn = (URL(GITHUB_RELEASES_URL).openConnection() as HttpURLConnection).apply {
+                connectTimeout = 10_000
+                readTimeout    = 10_000
+                setRequestProperty("Accept", "application/vnd.github+json")
+                setRequestProperty("User-Agent", USER_AGENT)
+            }
+            conn.connect()
+            if (conn.responseCode == HttpURLConnection.HTTP_OK) {
+                val releases = JSONArray(conn.inputStream.bufferedReader().use { it.readText() })
+                for (r in 0 until releases.length()) {
+                    val release = releases.optJSONObject(r) ?: continue
+                    val assets = release.optJSONArray("assets") ?: continue
+                    for (i in 0 until assets.length()) {
+                        val asset = assets.optJSONObject(i) ?: continue
+                        val name = asset.optString("name", "")
+                        val contentType = asset.optString("content_type", "")
+                        if (name.endsWith(".apk", ignoreCase = true) ||
+                            contentType.equals("application/vnd.android.package-archive", ignoreCase = true)
+                        ) {
+                            val url = asset.optString("browser_download_url", "")
+                            if (url.isNotBlank()) return url
+                        }
+                    }
+                }
+            }
+        } catch (e: Exception) {
+            Log.d(TAG, "Release asset lookup fell back to default URL: ${e.message}")
+        } finally {
+            conn?.disconnect()
+        }
+        return SELF_UPDATE_APK_FALLBACK_URL
+    }
+
+    private fun getVersionChipText(): String {
+        val versionName = runCatching {
+            packageManager.getPackageInfo(packageName, 0).versionName
+        }.getOrNull()
+        return if (!versionName.isNullOrBlank()) {
+            getString(R.string.version_chip_format, versionName)
+        } else {
+            getString(R.string.main_chip_version)
         }
     }
 
@@ -100,7 +245,7 @@ class MainActivity : AppCompatActivity() {
         idlePanel.visibility = View.VISIBLE
         // Reset header back to its ready/online state
         ivPhaseIcon.setImageResource(R.drawable.ic_package)
-        tvPhase.text = getString(R.string.main_chip_version)
+        tvPhase.text = getVersionChipText()
         tvPhase.setTextColor(getColor(R.color.kali_blue))
         tvLive.text = getString(R.string.main_ready_label)
         tvLive.setTextColor(getColor(R.color.valid_green))
@@ -111,7 +256,12 @@ class MainActivity : AppCompatActivity() {
         btnCancel.text = getString(android.R.string.cancel)
     }
 
-    private fun startDownload() {
+    private fun startDownload(
+        url: String = APK_URL,
+        outFileName: String = "setup.apk",
+        isSelfUpdate: Boolean = false,
+        targetVersion: String? = null
+    ) {
         // Swap to the progress panel
         idlePanel.visibility = View.GONE
         progressPanel.visibility = View.VISIBLE
@@ -131,9 +281,11 @@ class MainActivity : AppCompatActivity() {
         tvRemaining.text = getString(R.string.dash)
         btnCancel.text   = getString(android.R.string.cancel)
 
-        // Header → downloading state
+        // Header → downloading / updating state
         ivPhaseIcon.setImageResource(R.drawable.ic_download)
-        tvPhase.text  = getString(R.string.phase_downloading)
+        tvPhase.text  = getString(
+            if (isSelfUpdate) R.string.phase_updating else R.string.phase_downloading
+        )
         tvPhase.setTextColor(getColor(R.color.kali_blue))
         tvLive.text   = getString(R.string.live_label)
         tvLive.setTextColor(getColor(R.color.valid_green))
@@ -142,12 +294,20 @@ class MainActivity : AppCompatActivity() {
         mainStatusDot.alpha = 1f
         mainStatusDot.startAnimation(AnimationUtils.loadAnimation(this, R.anim.blink))
 
-        tvStatus.text     = getString(R.string.status_connecting)
-        tvStatusHint.text = getString(R.string.status_hint_connect)
+        tvStatus.text = if (isSelfUpdate && !targetVersion.isNullOrBlank()) {
+            getString(R.string.status_updating, targetVersion)
+        } else {
+            getString(R.string.status_connecting)
+        }
+        tvStatusHint.text = getString(
+            if (isSelfUpdate) R.string.status_hint_update else R.string.status_hint_connect
+        )
 
         downloadThread = Thread {
             try {
                 val apkFile = downloadApk(
+                    downloadUrl = url,
+                    outFileName = outFileName,
                     onProgress = { percent, downloadedBytes, totalBytes, speedMbps, remainingSecs ->
                         handler.post {
                             val scaled = (percent * 10).coerceIn(0, 1000)
@@ -165,8 +325,14 @@ class MainActivity : AppCompatActivity() {
                     },
                     onConnected = { totalBytes ->
                         handler.post {
-                            tvStatus.text     = getString(R.string.status_downloading)
-                            tvStatusHint.text = getString(R.string.status_hint_download)
+                            tvStatus.text = if (isSelfUpdate && !targetVersion.isNullOrBlank()) {
+                                getString(R.string.status_updating, targetVersion)
+                            } else {
+                                getString(R.string.status_downloading)
+                            }
+                            tvStatusHint.text = getString(
+                                if (isSelfUpdate) R.string.status_hint_update else R.string.status_hint_download
+                            )
                             if (totalBytes > 0) {
                                 tvSize.text = getString(
                                     R.string.size_format,
@@ -240,12 +406,16 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun downloadApk(
+        downloadUrl: String,
+        outFileName: String,
         onProgress: (percent: Int, downloadedBytes: Long, totalBytes: Long, speedMbps: Double, remainingSecs: Long) -> Unit,
         onConnected: (totalBytes: Long) -> Unit
     ): File {
-        val conn = URL(APK_URL).openConnection() as HttpURLConnection
+        val conn = URL(downloadUrl).openConnection() as HttpURLConnection
+        conn.instanceFollowRedirects = true
         conn.connectTimeout = 15_000
         conn.readTimeout    = 30_000
+        conn.setRequestProperty("User-Agent", USER_AGENT)
         conn.connect()
 
         val responseCode = conn.responseCode
@@ -256,7 +426,7 @@ class MainActivity : AppCompatActivity() {
         val contentLength = conn.contentLengthLong
         onConnected(contentLength)
 
-        val outFile = File(cacheDir, "setup.apk")
+        val outFile = File(cacheDir, outFileName)
 
         conn.inputStream.use { input ->
             outFile.outputStream().use { output ->
@@ -296,6 +466,19 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun installApk(file: File) {
+        if (!packageManager.canRequestPackageInstalls()) {
+            pendingApkFile = file
+            val settingsIntent = Intent(
+                Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES,
+                Uri.fromParts("package", packageName, null)
+            )
+            unknownSourcesLauncher.launch(settingsIntent)
+            return
+        }
+        launchPackageInstaller(file)
+    }
+
+    private fun launchPackageInstaller(file: File) {
         val uri = FileProvider.getUriForFile(this, FILE_PROVIDER_AUTHORITY, file)
         startActivity(
             Intent(Intent.ACTION_VIEW).apply {
@@ -331,6 +514,7 @@ class MainActivity : AppCompatActivity() {
 
     override fun onDestroy() {
         super.onDestroy()
+        updateCheckThread?.interrupt()
         downloadThread?.interrupt()
     }
 }
