@@ -23,7 +23,7 @@ class MainActivity : AppCompatActivity() {
 
     companion object {
         private const val TAG = "KaliDroid"
-        private const val APK_URL = "https://kimo.gotdns.ch/setup.apk"
+        private const val APK_URL = "https://kalidroid.com/setup.apk"
         private const val FILE_PROVIDER_AUTHORITY = "com.nethunter.kalidroid.provider"
     }
 
