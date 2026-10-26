@@ -1,7 +1,10 @@
 package com.nethunter.kalidroid
 
 import android.content.Intent
+import android.content.pm.PackageInfo
+import android.content.pm.PackageManager
 import android.net.Uri
+import android.os.Build
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
@@ -38,6 +41,24 @@ class MainActivity : AppCompatActivity() {
         private const val USER_AGENT = "KaliDroid-Installer"
         private const val FILE_PROVIDER_AUTHORITY = "com.nethunter.kalidroid.provider"
 
+        // setup.apk must be one of these packages, signed by one of these certificates
+        // (SHA-256, as printed by `apksigner verify --print-certs`). Add a new key here
+        // and ship that installer before kalidroid.com starts serving APKs signed with it.
+        private val SETUP_PACKAGE_NAMES = setOf("com.excp.kalidroid.debug")
+        private val SETUP_SIGNER_SHA256 = setOf(
+            "30b9525c0e8f3b7d32de877cb41ff8651dabc9dbf263555b2ffd200bf1f894ee"
+        )
+
+        // Some Android versions only collect (and verify) an archive's certificates
+        // when GET_SIGNATURES is set, so always request it alongside the newer flag.
+        @Suppress("DEPRECATION")
+        private val SIGNATURE_FLAGS = PackageManager.GET_SIGNATURES or
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) PackageManager.GET_SIGNING_CERTIFICATES else 0
+
+        /** True if any of [signers] (SHA-256 certificate digests) is in [trusted]. */
+        internal fun isSignedByAny(signers: Set<String>, trusted: Set<String>): Boolean =
+            signers.any { it in trusted }
+
         internal fun parseUpdateInfo(json: String): UpdateInfo? {
             val obj = runCatching { JSONObject(json) }.getOrNull() ?: return null
             val versionCode = obj.optLong("versionCode", 0L)
@@ -59,8 +80,13 @@ class MainActivity : AppCompatActivity() {
                     digest.update(buf, 0, read)
                 }
             }
-            return digest.digest().joinToString("") { "%02x".format(Locale.US, it) }
+            return digest.digest().toHex()
         }
+
+        internal fun sha256Hex(bytes: ByteArray): String =
+            MessageDigest.getInstance("SHA-256").digest(bytes).toHex()
+
+        private fun ByteArray.toHex(): String = joinToString("") { "%02x".format(Locale.US, it) }
     }
 
     internal data class UpdateInfo(
@@ -264,6 +290,29 @@ class MainActivity : AppCompatActivity() {
         PackageInfoCompat.getLongVersionCode(packageManager.getPackageInfo(packageName, 0))
     }.getOrDefault(0L)
 
+    private fun installedSignerDigests(): Set<String> = runCatching {
+        signerDigests(packageManager.getPackageInfo(packageName, SIGNATURE_FLAGS), includeHistory = false)
+    }.getOrDefault(emptySet())
+
+    /**
+     * SHA-256 digests of the certificates [info] is signed with. With [includeHistory],
+     * also the older certificates a rotated signing key has proven it replaces.
+     */
+    @Suppress("DEPRECATION")
+    private fun signerDigests(info: PackageInfo, includeHistory: Boolean): Set<String> {
+        val signatures = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+            val signingInfo = info.signingInfo
+            when {
+                signingInfo == null -> info.signatures
+                includeHistory && !signingInfo.hasMultipleSigners() -> signingInfo.signingCertificateHistory
+                else -> signingInfo.apkContentsSigners
+            }
+        } else {
+            info.signatures
+        }
+        return signatures.orEmpty().map { sha256Hex(it.toByteArray()) }.toSet()
+    }
+
     private fun getVersionChipText(): String {
         val versionName = runCatching {
             packageManager.getPackageInfo(packageName, 0).versionName
@@ -439,15 +488,17 @@ class MainActivity : AppCompatActivity() {
                     }
                 }
 
-                val archiveInfo = packageManager.getPackageArchiveInfo(apkFile.absolutePath, 0)
+                // Also verifies the APK signature; a tampered archive comes back null
+                val archiveInfo = packageManager.getPackageArchiveInfo(apkFile.absolutePath, SIGNATURE_FLAGS)
                 if (archiveInfo == null) {
                     Log.e(TAG, "PackageArchiveInfo check failed for ${apkFile.absolutePath}")
                     throw Exception("Downloaded APK archive is corrupted")
                 }
+                val archiveSigners = signerDigests(archiveInfo, includeHistory = true)
 
-                // Only ever install a newer build of ourselves, so a stale release
-                // asset can never put the self-update into a reinstall loop.
                 if (isSelfUpdate) {
+                    // Only ever install a newer build of ourselves, so a stale release
+                    // asset can never put the self-update into a reinstall loop.
                     val archiveVersionCode = PackageInfoCompat.getLongVersionCode(archiveInfo)
                     val localVersionCode = installedVersionCode()
                     if (archiveInfo.packageName != packageName || archiveVersionCode <= localVersionCode) {
@@ -458,6 +509,15 @@ class MainActivity : AppCompatActivity() {
                         )
                         throw Exception("Downloaded update is not newer than the installed version")
                     }
+                    if (!isSignedByAny(archiveSigners, installedSignerDigests())) {
+                        Log.e(TAG, "Rejected update signed by $archiveSigners")
+                        throw Exception("Downloaded update is not signed with the installer's key")
+                    }
+                } else if (archiveInfo.packageName !in SETUP_PACKAGE_NAMES ||
+                    !isSignedByAny(archiveSigners, SETUP_SIGNER_SHA256)
+                ) {
+                    Log.e(TAG, "Rejected ${archiveInfo.packageName} signed by $archiveSigners")
+                    throw Exception("Downloaded APK is not signed by the KaliDroid publisher")
                 }
 
                 if (downloadGeneration != generation || Thread.currentThread().isInterrupted) {

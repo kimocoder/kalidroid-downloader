@@ -29,7 +29,7 @@
     <string name="status_hint_connect">resolving host · negotiating tls</string>
     <string name="status_hint_download">payload in transit · do not exit</string>
     <string name="status_hint_update">new build detected · downloading update</string>
-    <string name="status_hint_verify">checking apk signature &amp; magic</string>
+    <string name="status_hint_verify">verifying apk signature &amp; publisher</string>
     <string name="status_hint_install">launching system installer</string>
     <string name="status_hint_error">tap ok to dismiss</string>
 

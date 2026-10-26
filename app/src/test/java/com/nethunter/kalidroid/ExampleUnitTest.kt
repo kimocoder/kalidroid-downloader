@@ -61,6 +61,25 @@ class ExampleUnitTest {
     }
 
     @Test
+    fun sha256Hex_hashesBytes() {
+        assertEquals(validSha256, MainActivity.sha256Hex("abc".toByteArray()))
+    }
+
+    @Test
+    fun isSignedByAny_requiresATrustedSigner() {
+        val trusted = "30b9525c0e8f3b7d32de877cb41ff8651dabc9dbf263555b2ffd200bf1f894ee"
+        val other = "eb9e6a88121a66cd5acc7beb20c2e67415085b556018bf3616f3448df651ff4f"
+
+        assertTrue(MainActivity.isSignedByAny(setOf(trusted), setOf(trusted)))
+        // Rotated key: lineage still contains the trusted certificate
+        assertTrue(MainActivity.isSignedByAny(setOf(trusted, other), setOf(trusted)))
+        assertFalse(MainActivity.isSignedByAny(setOf(other), setOf(trusted)))
+        // Unsigned archive or unreadable installed signers must never match
+        assertFalse(MainActivity.isSignedByAny(emptySet(), setOf(trusted)))
+        assertFalse(MainActivity.isSignedByAny(setOf(trusted), emptySet()))
+    }
+
+    @Test
     fun sha256Hex_hashesFileContents() {
         val file = File.createTempFile("sha256", ".bin")
         try {
