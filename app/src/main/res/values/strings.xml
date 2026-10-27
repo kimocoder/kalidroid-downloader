@@ -6,7 +6,6 @@
     <string name="btn_install">Install</string>
 
     <!-- Main screen chrome -->
-    <string name="main_chip_version">v2.3</string>
     <string name="version_chip_format">v%1$s</string>
     <string name="main_ready_label">Ready</string>
     <string name="main_tagline">Pentesting toolkit · one-tap install</string>
@@ -35,7 +34,7 @@
     <string name="status_hint_update">new build detected · downloading update</string>
     <string name="status_hint_verify">verifying apk signature &amp; publisher</string>
     <string name="status_hint_install">launching system installer</string>
-    <string name="status_hint_error">tap ok to dismiss</string>
+    <string name="status_hint_error">tap OK to dismiss</string>
     <string name="status_hint_waiting">download resumes automatically</string>
     <string name="status_hint_ready">tap install to continue</string>
 
@@ -50,6 +49,7 @@
     <string name="label_eta">ETA</string>
     <string name="live_label">Live</string>
     <string name="offline_label">Offline</string>
+    <string name="failed_label">Failed</string>
     <string name="complete_label">Complete</string>
     <string name="dash">--</string>
 
@@ -73,4 +73,11 @@
     <string name="error_download_removed">The download was removed</string>
     <string name="error_http">Server returned HTTP %1$d</string>
     <string name="error_download_failed">Download failed (code %1$d)</string>
+    <string name="error_not_apk">Downloaded file is not a valid APK (%1$s)</string>
+    <string name="error_checksum">Downloaded APK checksum does not match</string>
+    <string name="error_corrupted">Downloaded APK archive is corrupted</string>
+    <string name="error_update_not_newer">Downloaded update is not newer than the installed version</string>
+    <string name="error_update_wrong_key">Downloaded update is not signed with the installer\'s key</string>
+    <string name="error_wrong_publisher">Downloaded APK is not signed by the KaliDroid publisher</string>
+    <string name="error_move_failed">Could not move the APK into place</string>
 </resources>

@@ -6,9 +6,8 @@
         <item name="colorSecondary">@color/kali_blue</item>
         <item name="colorSecondaryVariant">@color/kali_blue_dark</item>
         <item name="colorOnSecondary">@color/bg_dark</item>
+        <!-- Bars are transparent (edge-to-edge, set up in MainActivity) over this background -->
         <item name="android:windowBackground">@color/bg_dark</item>
-        <item name="android:statusBarColor">@color/bg_dark</item>
-        <item name="android:navigationBarColor">@color/bg_dark</item>
     </style>
 
 </resources>
