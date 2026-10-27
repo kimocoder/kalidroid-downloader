@@ -3,6 +3,7 @@
     <string name="subtitle">Online Installer</string>
     <string name="logo_desc">KaliDroid logo</string>
     <string name="btn_download">Download &amp; Setup</string>
+    <string name="btn_install">Install</string>
 
     <!-- Main screen chrome -->
     <string name="main_chip_version">v2.3</string>
@@ -16,6 +17,7 @@
     <string name="phase_updating">Updating</string>
     <string name="phase_verifying">Verifying</string>
     <string name="phase_installing">Installing</string>
+    <string name="phase_ready">Ready</string>
     <string name="phase_error">Error</string>
 
     <!-- Status lines -->
@@ -24,14 +26,18 @@
     <string name="status_updating">Updating installer to %1$s…</string>
     <string name="status_verifying">Validating integrity</string>
     <string name="status_installing">Handing off to package installer</string>
+    <string name="status_waiting">Waiting for network…</string>
+    <string name="status_ready">Package verified · ready to install</string>
 
     <!-- Status hints (secondary line under main status) -->
     <string name="status_hint_connect">resolving host · negotiating tls</string>
-    <string name="status_hint_download">payload in transit · do not exit</string>
+    <string name="status_hint_download">payload in transit · safe to leave the app</string>
     <string name="status_hint_update">new build detected · downloading update</string>
     <string name="status_hint_verify">verifying apk signature &amp; publisher</string>
     <string name="status_hint_install">launching system installer</string>
     <string name="status_hint_error">tap ok to dismiss</string>
+    <string name="status_hint_waiting">download resumes automatically</string>
+    <string name="status_hint_ready">tap install to continue</string>
 
     <!-- Remaining time -->
     <string name="remaining_calculating">--</string>
@@ -61,4 +67,10 @@
 
     <!-- Misc -->
     <string name="error_unknown">An unknown error occurred</string>
+    <string name="error_no_space">Not enough free storage: %1$s needed</string>
+    <string name="error_no_space_generic">Not enough free storage</string>
+    <string name="error_storage_unavailable">Storage is not available</string>
+    <string name="error_download_removed">The download was removed</string>
+    <string name="error_http">Server returned HTTP %1$d</string>
+    <string name="error_download_failed">Download failed (code %1$d)</string>
 </resources>
