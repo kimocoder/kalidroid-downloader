@@ -2,3 +2,8 @@ build/
 .gradle/
 .idea/
 local.properties
+
+# Signing keys and their base64 copies: never commit these
+*.jks
+*.keystore
+*.jks.b64
