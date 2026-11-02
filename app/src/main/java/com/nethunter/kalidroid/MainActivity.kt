@@ -1,10 +1,15 @@
 package com.nethunter.kalidroid
 
+import android.animation.ValueAnimator
+import android.app.DownloadManager
 import android.content.Intent
+import android.content.res.ColorStateList
+import android.graphics.Color
 import android.net.Uri
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
+import android.os.SystemClock
 import android.provider.Settings
 import android.util.Log
 import android.view.View
@@ -12,60 +17,59 @@ import android.view.animation.AnimationUtils
 import android.widget.ImageView
 import android.widget.ProgressBar
 import android.widget.TextView
+import androidx.activity.SystemBarStyle
+import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.annotation.AnimRes
+import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.content.FileProvider
+import androidx.core.view.ViewCompat
+import androidx.core.view.WindowInsetsCompat
+import androidx.core.view.isVisible
+import androidx.core.view.updatePadding
+import androidx.lifecycle.Lifecycle
 import com.google.android.material.button.MaterialButton
+import com.google.android.material.dialog.MaterialAlertDialogBuilder
 import com.google.android.material.progressindicator.CircularProgressIndicator
-import org.json.JSONArray
-import org.json.JSONObject
 import java.io.File
-import java.net.HttpURLConnection
-import java.net.URL
 import java.util.Locale
 
 class MainActivity : AppCompatActivity() {
 
     companion object {
-        private const val TAG = "KaliDroid"
         private const val APK_URL = "https://kalidroid.com/setup.apk"
-        private const val GITHUB_LATEST_COMMIT_URL =
-            "https://api.github.com/repos/kimocoder/kalidroid-downloader/commits/master"
-        private const val GITHUB_RELEASES_URL =
-            "https://api.github.com/repos/kimocoder/kalidroid-downloader/releases?per_page=5"
-        private const val SELF_UPDATE_APK_FALLBACK_URL =
-            "https://github.com/kimocoder/kalidroid-downloader/releases/download/latest/kalidroid.apk"
-        private const val USER_AGENT = "KaliDroid-Installer"
         private const val FILE_PROVIDER_AUTHORITY = "com.nethunter.kalidroid.provider"
-
-        internal fun isNewerCommit(remoteSha: String, localSha: String): Boolean {
-            val remote = remoteSha.trim()
-            val local = localSha.trim()
-            fun isHexSha(s: String): Boolean =
-                s.length >= 7 && s.all { it.isDigit() || it.lowercaseChar() in 'a'..'f' }
-
-            if (!isHexSha(remote) || !isHexSha(local)) return false
-            return !remote.startsWith(local, ignoreCase = true) &&
-                !local.startsWith(remote, ignoreCase = true)
-        }
+        private const val POLL_INTERVAL_MS = 500L
     }
 
     private val handler = Handler(Looper.getMainLooper())
-    private var downloadThread: Thread? = null
+    private val downloads by lazy { ApkDownloads(this) }
+    private val selfUpdate by lazy { SelfUpdate(this) }
     private var updateCheckThread: Thread? = null
-    @Volatile
-    private var activeConnection: HttpURLConnection? = null
-    @Volatile
-    private var downloadGeneration = 0
-    private var pendingApkFile: File? = null
+    private var updateDialog: AlertDialog? = null
+    private var polling = false
+    private var errorShown = false
+
+    // Smoothed download speed for the stats tiles
+    private var lastPollBytes = -1L
+    private var lastPollTime = 0L
+    private var speedBps = 0.0
+    private var spaceCheckedFor = -1L
+
+    private val pollRunnable = object : Runnable {
+        override fun run() {
+            pollDownload()
+            if (polling) handler.postDelayed(this, POLL_INTERVAL_MS)
+        }
+    }
 
     private val unknownSourcesLauncher = registerForActivityResult(
         ActivityResultContracts.StartActivityForResult()
     ) {
-        val file = pendingApkFile
-        pendingApkFile = null
-        if (file != null && file.exists() && packageManager.canRequestPackageInstalls()) {
-            launchPackageInstaller(file)
+        val pending = downloads.load()
+        if (pending != null && pending.isVerified && packageManager.canRequestPackageInstalls()) {
+            launchPackageInstaller(downloads.apkFile(pending))
         }
     }
 
@@ -94,11 +98,34 @@ class MainActivity : AppCompatActivity() {
     private lateinit var tvSpeed: TextView
     private lateinit var tvSize: TextView
     private lateinit var tvRemaining: TextView
+    private lateinit var btnInstall: MaterialButton
     private lateinit var btnCancel: MaterialButton
 
     override fun onCreate(savedInstanceState: Bundle?) {
+        // Light bar icons over our dark background, on every Android version
+        enableEdgeToEdge(
+            statusBarStyle = SystemBarStyle.dark(Color.TRANSPARENT),
+            navigationBarStyle = SystemBarStyle.dark(Color.TRANSPARENT)
+        )
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_main)
+
+        // Keep the card clear of the status bar, navigation bar and display cutouts. The space
+        // above and below the card is padding here rather than card margin, because ScrollView
+        // leaves a child's vertical margins out of how far it lets you scroll.
+        val cardSpacing = resources.getDimensionPixelSize(R.dimen.card_spacing)
+        ViewCompat.setOnApplyWindowInsetsListener(findViewById(R.id.root)) { view, insets ->
+            val bars = insets.getInsets(
+                WindowInsetsCompat.Type.systemBars() or WindowInsetsCompat.Type.displayCutout()
+            )
+            view.updatePadding(
+                left = bars.left,
+                top = bars.top + cardSpacing,
+                right = bars.right,
+                bottom = bars.bottom + cardSpacing
+            )
+            insets
+        }
 
         // Decorative ring views
         ivMainRingScanner = findViewById(R.id.ivMainRingScanner)
@@ -107,10 +134,10 @@ class MainActivity : AppCompatActivity() {
         ivRingDashed      = findViewById(R.id.ivRingDashed)
 
         // Idle decorative animations
-        ivMainRingScanner.startAnimation(AnimationUtils.loadAnimation(this, R.anim.rotate_cw))
-        ivMainRingDashed.startAnimation(AnimationUtils.loadAnimation(this, R.anim.rotate_ccw))
+        animate(ivMainRingScanner, R.anim.rotate_cw)
+        animate(ivMainRingDashed, R.anim.rotate_ccw)
         mainStatusDot = findViewById(R.id.mainStatusDot)
-        mainStatusDot.startAnimation(AnimationUtils.loadAnimation(this, R.anim.blink))
+        animate(mainStatusDot, R.anim.blink)
 
         // Header
         ivPhaseIcon = findViewById(R.id.ivPhaseIcon)
@@ -131,473 +158,212 @@ class MainActivity : AppCompatActivity() {
         tvSpeed      = findViewById(R.id.tvSpeed)
         tvSize       = findViewById(R.id.tvSize)
         tvRemaining  = findViewById(R.id.tvRemaining)
+        btnInstall   = findViewById(R.id.btnInstall)
         btnCancel    = findViewById(R.id.btnCancel)
 
         circular.max = 1000
+        tvPercent.text = getString(R.string.percent_format, 0)
 
         findViewById<MaterialButton>(R.id.btnDownload).setOnClickListener {
             updateCheckThread?.interrupt()
-            startDownload()
+            startDownload(APK_URL, isSelfUpdate = false)
+        }
+
+        btnInstall.setOnClickListener {
+            downloads.load()?.takeIf { it.isVerified }?.let { launchInstall(it) }
         }
 
         btnCancel.setOnClickListener {
-            cancelActiveDownload()
+            stopPolling()
+            downloads.cancel()
             showIdlePanel()
         }
 
+        downloads.cleanupStaleFiles()
         checkForSelfUpdate()
     }
 
-    private fun cancelActiveDownload() {
-        downloadGeneration++
-        handler.removeCallbacksAndMessages(null)
-        downloadThread?.interrupt()
-        downloadThread = null
-        val conn = activeConnection
-        activeConnection = null
-        if (conn != null) {
-            Thread {
-                runCatching { conn.disconnect() }
-            }.start()
-        }
+    override fun onResume() {
+        super.onResume()
+        resumePending()
     }
 
-    private fun postForDownload(generation: Int, action: () -> Unit) {
-        handler.post {
-            if (downloadGeneration == generation && !isFinishing && !isDestroyed) {
-                action()
+    override fun onStop() {
+        super.onStop()
+        // The download itself keeps running in DownloadManager
+        stopPolling()
+    }
+
+    override fun onDestroy() {
+        super.onDestroy()
+        updateDialog?.dismiss()
+        updateDialog = null
+        updateCheckThread?.interrupt()
+        handler.removeCallbacksAndMessages(null)
+    }
+
+    /** Brings the UI in line with the saved state, e.g. after rotation or a process restart. */
+    private fun resumePending() {
+        val pending = downloads.load()
+        when {
+            pending == null -> {
+                val error = downloads.takeFinishError()
+                if (error != null) {
+                    showErrorState(error)
+                } else if (!errorShown && progressPanel.isVisible) {
+                    showIdlePanel()
+                }
+            }
+            pending.isVerified -> onApkReady(pending)
+            else -> {
+                showDownloadingPanel(pending)
+                startPolling()
             }
         }
     }
 
+    // ------------------------------------------------------------------
+    // Self-update
+    // ------------------------------------------------------------------
+
     private fun checkForSelfUpdate() {
-        val localSha = getString(R.string.git_commit_sha).trim()
-        if (localSha.isBlank()) return
+        val localVersionCode = installedVersionCode()
 
         updateCheckThread = Thread {
-            var conn: HttpURLConnection? = null
-            try {
-                conn = (URL(GITHUB_LATEST_COMMIT_URL).openConnection() as HttpURLConnection).apply {
-                    connectTimeout = 10_000
-                    readTimeout    = 10_000
-                    setRequestProperty("Accept", "application/vnd.github+json")
-                    setRequestProperty("User-Agent", USER_AGENT)
+            val update = selfUpdate.fetchNewerBuild(localVersionCode)
+            // Interrupted: superseded by user action or lifecycle teardown
+            if (update == null || Thread.currentThread().isInterrupted) return@Thread
+            handler.post {
+                if (!isFinishing && !isDestroyed &&
+                    downloads.load() == null &&
+                    !progressPanel.isVisible &&
+                    !selfUpdate.isSnoozed(update.versionCode)
+                ) {
+                    promptSelfUpdate(update)
                 }
-                conn.connect()
-
-                if (Thread.currentThread().isInterrupted) return@Thread
-                if (conn.responseCode != HttpURLConnection.HTTP_OK) {
-                    Log.d(TAG, "Self-update commit check returned HTTP ${conn.responseCode}")
-                    return@Thread
-                }
-
-                val body = conn.inputStream.bufferedReader().use { it.readText() }
-                if (Thread.currentThread().isInterrupted) return@Thread
-
-                val commitJson = JSONObject(body)
-                val remoteSha = commitJson.optString("sha", "").trim()
-                if (!isNewerCommit(remoteSha, localSha)) {
-                    Log.d(TAG, "Installer commit is up to date (sha=${localSha.take(7)})")
-                    return@Thread
-                }
-
-                val updateUrl = resolveSelfUpdateApkUrl()
-                if (Thread.currentThread().isInterrupted) return@Thread
-
-                val shortSha = remoteSha.take(7)
-                Log.i(TAG, "Newer commit $shortSha found (local=${localSha.take(7)}): $updateUrl")
-                handler.post {
-                    if (!isFinishing && !isDestroyed &&
-                        downloadThread?.isAlive != true &&
-                        progressPanel.visibility != View.VISIBLE
-                    ) {
-                        startDownload(
-                            url = updateUrl,
-                            outFileName = "kalidroid-update.apk",
-                            isSelfUpdate = true,
-                            targetVersion = shortSha
-                        )
-                    }
-                }
-            } catch (_: InterruptedException) {
-                // superseded by user action or lifecycle teardown
-            } catch (e: Exception) {
-                Log.d(TAG, "Self-update check skipped: ${e.message}")
-            } finally {
-                conn?.disconnect()
             }
         }.also { it.start() }
     }
 
-    private fun resolveSelfUpdateApkUrl(): String {
-        var conn: HttpURLConnection? = null
-        try {
-            conn = (URL(GITHUB_RELEASES_URL).openConnection() as HttpURLConnection).apply {
-                connectTimeout = 10_000
-                readTimeout    = 10_000
-                setRequestProperty("Accept", "application/vnd.github+json")
-                setRequestProperty("User-Agent", USER_AGENT)
+    private fun promptSelfUpdate(update: UpdateInfo) {
+        val targetVersion = getString(R.string.build_format, update.versionCode)
+        updateDialog?.dismiss()
+        updateDialog = MaterialAlertDialogBuilder(this)
+            .setTitle(R.string.update_available_title)
+            .setMessage(getString(R.string.update_available_message, targetVersion))
+            .setPositiveButton(R.string.update_now) { _, _ ->
+                startDownload(
+                    url = update.url,
+                    isSelfUpdate = true,
+                    targetLabel = targetVersion,
+                    expectedSha256 = update.sha256
+                )
             }
-            conn.connect()
-            if (conn.responseCode == HttpURLConnection.HTTP_OK) {
-                val releases = JSONArray(conn.inputStream.bufferedReader().use { it.readText() })
-                for (r in 0 until releases.length()) {
-                    val release = releases.optJSONObject(r) ?: continue
-                    val assets = release.optJSONArray("assets") ?: continue
-                    for (i in 0 until assets.length()) {
-                        val asset = assets.optJSONObject(i) ?: continue
-                        val name = asset.optString("name", "")
-                        val contentType = asset.optString("content_type", "")
-                        if (name.endsWith(".apk", ignoreCase = true) ||
-                            contentType.equals("application/vnd.android.package-archive", ignoreCase = true)
-                        ) {
-                            val url = asset.optString("browser_download_url", "")
-                            if (url.isNotBlank()) return url
-                        }
-                    }
-                }
-            }
-        } catch (e: Exception) {
-            Log.d(TAG, "Release asset lookup fell back to default URL: ${e.message}")
-        } finally {
-            conn?.disconnect()
-        }
-        return SELF_UPDATE_APK_FALLBACK_URL
+            .setNegativeButton(R.string.update_later) { _, _ -> selfUpdate.snooze(update.versionCode) }
+            .show()
     }
 
-    private fun getVersionChipText(): String {
-        val versionName = runCatching {
-            packageManager.getPackageInfo(packageName, 0).versionName
-        }.getOrNull()
-        return if (!versionName.isNullOrBlank()) {
-            getString(R.string.version_chip_format, versionName)
-        } else {
-            getString(R.string.main_chip_version)
-        }
-    }
+    private fun getVersionChipText(): String =
+        getString(R.string.version_chip_format, installedPackage()?.versionName.orEmpty())
 
-    private fun showIdlePanel() {
-        ivRingScanner.clearAnimation()
-        ivRingDashed.clearAnimation()
-        progressPanel.visibility = View.GONE
-        idlePanel.visibility = View.VISIBLE
-        ivMainRingScanner.startAnimation(AnimationUtils.loadAnimation(this, R.anim.rotate_cw))
-        ivMainRingDashed.startAnimation(AnimationUtils.loadAnimation(this, R.anim.rotate_ccw))
-        // Reset header back to its ready/online state
-        ivPhaseIcon.setImageResource(R.drawable.ic_package)
-        tvPhase.text = getVersionChipText()
-        tvPhase.setTextColor(getColor(R.color.kali_blue))
-        tvLive.text = getString(R.string.main_ready_label)
-        tvLive.setTextColor(getColor(R.color.valid_green))
-        mainStatusDot.setBackgroundResource(R.drawable.status_dot)
-        mainStatusDot.backgroundTintList = null
-        mainStatusDot.alpha = 1f
-        mainStatusDot.startAnimation(AnimationUtils.loadAnimation(this, R.anim.blink))
-        btnCancel.text = getString(android.R.string.cancel)
-    }
+    // ------------------------------------------------------------------
+    // Download
+    // ------------------------------------------------------------------
 
     private fun startDownload(
-        url: String = APK_URL,
-        outFileName: String = "setup.apk",
-        isSelfUpdate: Boolean = false,
-        targetVersion: String? = null
+        url: String,
+        isSelfUpdate: Boolean,
+        targetLabel: String? = null,
+        expectedSha256: String? = null
     ) {
-        cancelActiveDownload()
-        val generation = ++downloadGeneration
-
-        // Swap to the progress panel
-        ivMainRingScanner.clearAnimation()
-        ivMainRingDashed.clearAnimation()
-        idlePanel.visibility = View.GONE
-        progressPanel.visibility = View.VISIBLE
-
-        // Decorative animations for the progress rings + dot
-        ivRingScanner.startAnimation(AnimationUtils.loadAnimation(this, R.anim.rotate_cw))
-        ivRingDashed.startAnimation(AnimationUtils.loadAnimation(this, R.anim.rotate_ccw))
-
-        // Reset state
-        progressBar.isIndeterminate = false
-        circular.isIndeterminate = false
-        circular.setProgressCompat(0, false)
-        progressBar.progress = 0
-        tvPercent.text   = getString(R.string.percent_format, 0)
-        tvSpeed.text     = getString(R.string.dash)
-        tvSize.text      = getString(R.string.dash)
-        tvRemaining.text = getString(R.string.dash)
-        btnCancel.text   = getString(android.R.string.cancel)
-
-        // Header → downloading / updating state
-        ivPhaseIcon.setImageResource(R.drawable.ic_download)
-        tvPhase.text  = getString(
-            if (isSelfUpdate) R.string.phase_updating else R.string.phase_downloading
-        )
-        tvPhase.setTextColor(getColor(R.color.kali_blue))
-        tvLive.text   = getString(R.string.live_label)
-        tvLive.setTextColor(getColor(R.color.valid_green))
-        mainStatusDot.setBackgroundResource(R.drawable.status_dot)
-        mainStatusDot.backgroundTintList = null
-        mainStatusDot.alpha = 1f
-        mainStatusDot.startAnimation(AnimationUtils.loadAnimation(this, R.anim.blink))
-
-        tvStatus.text = if (isSelfUpdate && !targetVersion.isNullOrBlank()) {
-            getString(R.string.status_updating, targetVersion)
-        } else {
-            getString(R.string.status_connecting)
+        stopPolling()
+        val pending = try {
+            downloads.start(url, isSelfUpdate, targetLabel, expectedSha256)
+        } catch (e: Exception) {
+            Log.e(TAG, "Could not start download", e)
+            showErrorState(e.message)
+            return
         }
-        tvStatusHint.text = getString(
-            if (isSelfUpdate) R.string.status_hint_update else R.string.status_hint_connect
-        )
-
-        downloadThread = Thread {
-            var downloadedFile: File? = null
-            try {
-                val apkFile = downloadApk(
-                    downloadUrl = url,
-                    outFileName = outFileName,
-                    onProgress = { percent, downloadedBytes, totalBytes, speedMbps, remainingSecs ->
-                        postForDownload(generation) {
-                            if (percent >= 0) {
-                                progressBar.isIndeterminate = false
-                                circular.isIndeterminate = false
-                                val scaled = (percent * 10).coerceIn(0, 1000)
-                                progressBar.progress = scaled
-                                circular.setProgressCompat(scaled, true)
-                                tvPercent.text = getString(R.string.percent_format, percent)
-                            } else {
-                                progressBar.isIndeterminate = true
-                                tvPercent.text = getString(R.string.dash)
-                            }
-                            tvSpeed.text = getString(R.string.speed_format, speedMbps)
-                            tvSize.text = if (totalBytes > 0) {
-                                getString(
-                                    R.string.size_format,
-                                    formatBytes(downloadedBytes),
-                                    formatBytes(totalBytes)
-                                )
-                            } else {
-                                formatBytes(downloadedBytes)
-                            }
-                            tvRemaining.text = formatRemaining(remainingSecs)
-                        }
-                    },
-                    onConnected = { totalBytes ->
-                        postForDownload(generation) {
-                            tvStatus.text = if (isSelfUpdate && !targetVersion.isNullOrBlank()) {
-                                getString(R.string.status_updating, targetVersion)
-                            } else {
-                                getString(R.string.status_downloading)
-                            }
-                            tvStatusHint.text = getString(
-                                if (isSelfUpdate) R.string.status_hint_update else R.string.status_hint_download
-                            )
-                            tvSize.text = if (totalBytes > 0) {
-                                getString(
-                                    R.string.size_format,
-                                    formatBytes(0L),
-                                    formatBytes(totalBytes)
-                                )
-                            } else {
-                                formatBytes(0L)
-                            }
-                        }
-                    }
-                )
-                downloadedFile = apkFile
-
-                Log.d(TAG, "Downloaded: ${apkFile.absolutePath} (${apkFile.length()} B)")
-
-                postForDownload(generation) {
-                    ivPhaseIcon.setImageResource(R.drawable.ic_package)
-                    tvPhase.text      = getString(R.string.phase_verifying)
-                    tvStatus.text     = getString(R.string.status_verifying)
-                    tvStatusHint.text = getString(R.string.status_hint_verify)
-                }
-
-                // Validate ZIP/APK magic: PK\x03\x04
-                val magic = ByteArray(4)
-                val magicRead = apkFile.inputStream().use { it.read(magic) }
-                if (magicRead < 4 ||
-                    magic[0] != 0x50.toByte() ||
-                    magic[1] != 0x4B.toByte() ||
-                    magic[2] != 0x03.toByte() ||
-                    magic[3] != 0x04.toByte()
-                ) {
-                    val hex = if (magicRead > 0) {
-                        magic.take(magicRead).joinToString(" ") { "%02X".format(it) }
-                    } else {
-                        "empty"
-                    }
-                    Log.e(TAG, "Not a valid APK: $hex")
-                    throw Exception("Downloaded file is not a valid APK ($hex)")
-                }
-
-                if (packageManager.getPackageArchiveInfo(apkFile.absolutePath, 0) == null) {
-                    Log.e(TAG, "PackageArchiveInfo check failed for ${apkFile.absolutePath}")
-                    throw Exception("Downloaded APK archive is corrupted")
-                }
-
-                if (downloadGeneration != generation || Thread.currentThread().isInterrupted) {
-                    throw InterruptedException()
-                }
-
-                postForDownload(generation) {
-                    progressBar.isIndeterminate = false
-                    circular.isIndeterminate = false
-                    progressBar.progress = 1000
-                    circular.setProgressCompat(1000, true)
-                    tvPercent.text  = getString(R.string.percent_format, 100)
-                    tvSpeed.text    = getString(R.string.dash)
-                    tvSize.text     = getString(
-                        R.string.size_format,
-                        formatBytes(apkFile.length()),
-                        formatBytes(apkFile.length())
-                    )
-                    tvRemaining.text = getString(R.string.dash)
-                    tvPhase.text    = getString(R.string.phase_installing)
-                    tvStatus.text   = getString(R.string.status_installing)
-                    tvStatusHint.text = getString(R.string.status_hint_install)
-                }
-
-                Thread.sleep(700)
-                if (downloadGeneration != generation || Thread.currentThread().isInterrupted) {
-                    throw InterruptedException()
-                }
-                postForDownload(generation) {
-                    showIdlePanel()
-                    installApk(apkFile)
-                }
-
-            } catch (_: InterruptedException) {
-                downloadedFile?.delete()
-            } catch (e: Exception) {
-                downloadedFile?.delete()
-                if (downloadGeneration != generation || Thread.currentThread().isInterrupted) return@Thread
-                postForDownload(generation) {
-                    showErrorState(e.message)
-                }
-            }
-        }
-        downloadThread?.start()
+        showDownloadingPanel(pending)
+        startPolling()
     }
 
-    private fun showErrorState(message: String?) {
-        ivMainRingScanner.clearAnimation()
-        ivMainRingDashed.clearAnimation()
-        idlePanel.visibility = View.GONE
-        progressPanel.visibility = View.VISIBLE
-        ivRingScanner.clearAnimation()
-        ivRingDashed.clearAnimation()
-        mainStatusDot.clearAnimation()
-        mainStatusDot.alpha = 1f
-        mainStatusDot.setBackgroundResource(R.drawable.status_dot)
-        mainStatusDot.backgroundTintList = android.content.res.ColorStateList.valueOf(
-            getColor(R.color.invalid_red)
-        )
-        tvLive.text = getString(R.string.offline_label)
-        tvLive.setTextColor(getColor(R.color.invalid_red))
+    private fun startPolling() {
+        if (polling) return
+        polling = true
+        handler.post(pollRunnable)
+    }
+
+    private fun stopPolling() {
+        polling = false
+        handler.removeCallbacks(pollRunnable)
+    }
+
+    private fun pollDownload() {
+        val pending = downloads.load()
+        if (pending == null) {
+            stopPolling()
+            downloads.takeFinishError()?.let { showErrorState(it) }
+            return
+        }
+        if (pending.isVerified) {
+            stopPolling()
+            onApkReady(pending)
+            return
+        }
+
+        val status = downloads.query(pending.downloadId)
+        when (status?.status) {
+            null -> if (downloads.forgetMissing(pending)) {
+                stopPolling()
+                showErrorState(getString(R.string.error_download_removed))
+            }
+            DownloadManager.STATUS_SUCCESSFUL -> {
+                // Keep polling: the verified APK shows up in the saved state when done
+                showVerifyingPanel()
+                downloads.finish(pending)
+            }
+            DownloadManager.STATUS_FAILED -> {
+                stopPolling()
+                downloads.discardFailed(pending)
+                showErrorState(downloads.failureMessage(status.reason))
+            }
+            else -> showProgress(pending, status)
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // Install
+    // ------------------------------------------------------------------
+
+    private fun onApkReady(pending: PendingDownload) {
+        val apk = downloads.apkFile(pending)
+        // Purged from cache by the system, or the user already installed it
+        if (!apk.exists() || (pending.installLaunched && downloads.isInstalled(pending))) {
+            downloads.discardApk(pending)
+            showIdlePanel()
+            return
+        }
+
+        showReadyPanel(apk.length())
+        // Only hand off while we're in front; otherwise wait for onResume
+        if (!pending.installLaunched && lifecycle.currentState.isAtLeast(Lifecycle.State.RESUMED)) {
+            launchInstall(pending)
+        }
+    }
+
+    private fun launchInstall(pending: PendingDownload) {
+        val launched = downloads.markInstallLaunched(pending)
         ivPhaseIcon.setImageResource(R.drawable.ic_package)
-        tvPhase.text       = getString(R.string.phase_error)
-        tvPhase.setTextColor(getColor(R.color.invalid_red))
-        tvStatus.text      = message ?: getString(R.string.error_unknown)
-        tvStatusHint.text  = getString(R.string.status_hint_error)
-        tvSpeed.text       = getString(R.string.dash)
-        tvRemaining.text   = getString(R.string.dash)
-        btnCancel.text     = getString(android.R.string.ok)
-    }
-
-    private fun downloadApk(
-        downloadUrl: String,
-        outFileName: String,
-        onProgress: (percent: Int, downloadedBytes: Long, totalBytes: Long, speedMbps: Double, remainingSecs: Long) -> Unit,
-        onConnected: (totalBytes: Long) -> Unit
-    ): File {
-        val conn = URL(downloadUrl).openConnection() as HttpURLConnection
-        activeConnection = conn
-        val tempFile = File.createTempFile("$outFileName.", ".tmp", cacheDir)
-        try {
-            conn.instanceFollowRedirects = true
-            conn.connectTimeout = 15_000
-            conn.readTimeout    = 30_000
-            conn.setRequestProperty("User-Agent", USER_AGENT)
-            conn.connect()
-
-            if (Thread.currentThread().isInterrupted) throw InterruptedException()
-
-            val responseCode = conn.responseCode
-            if (responseCode != HttpURLConnection.HTTP_OK) {
-                throw Exception("Server returned HTTP $responseCode")
-            }
-
-            val contentLength = conn.contentLengthLong
-            onConnected(contentLength)
-
-            conn.inputStream.use { input ->
-                tempFile.outputStream().use { output ->
-                    val buf = ByteArray(65_536)
-                    var downloaded = 0L
-                    var read: Int
-                    val startTime = System.currentTimeMillis()
-                    var lastTime  = startTime
-                    var lastBytes = 0L
-
-                    while (input.read(buf).also { read = it } != -1) {
-                        if (Thread.currentThread().isInterrupted) throw InterruptedException()
-                        output.write(buf, 0, read)
-                        downloaded += read
-
-                        val now = System.currentTimeMillis()
-                        if (now - lastTime >= 250) {
-                            val intervalBytes = downloaded - lastBytes
-                            val intervalMs = (now - lastTime).coerceAtLeast(1)
-                            val speedBps = intervalBytes * 1000.0 / intervalMs
-                            val speedMbps = speedBps / (1024.0 * 1024.0)
-
-                            val percent = if (contentLength > 0) {
-                                (downloaded * 100 / contentLength).toInt().coerceIn(0, 99)
-                            } else {
-                                -1
-                            }
-                            val remaining = if (contentLength > 0 && speedBps > 0)
-                                ((contentLength - downloaded) / speedBps).toLong() else -1L
-
-                            onProgress(percent, downloaded, contentLength, speedMbps, remaining)
-                            lastTime  = now
-                            lastBytes = downloaded
-                        }
-                    }
-
-                    if (contentLength > 0 && downloaded != contentLength) {
-                        throw Exception(
-                            "Download incomplete (${formatBytes(downloaded)} / ${formatBytes(contentLength)})"
-                        )
-                    }
-                }
-            }
-
-            if (Thread.currentThread().isInterrupted) throw InterruptedException()
-
-            val outFile = File(cacheDir, outFileName)
-            if (outFile.exists()) outFile.delete()
-            if (!tempFile.renameTo(outFile)) {
-                tempFile.copyTo(outFile, overwrite = true)
-                tempFile.delete()
-            }
-            return outFile
-        } finally {
-            if (tempFile.exists()) {
-                tempFile.delete()
-            }
-            if (activeConnection === conn) {
-                activeConnection = null
-            }
-            runCatching { conn.disconnect() }
-        }
+        tvPhase.text      = getString(R.string.phase_installing)
+        tvStatus.text     = getString(R.string.status_installing)
+        tvStatusHint.text = getString(R.string.status_hint_install)
+        installApk(downloads.apkFile(launched))
     }
 
     private fun installApk(file: File) {
         try {
             if (!packageManager.canRequestPackageInstalls()) {
-                pendingApkFile = file
                 val settingsIntent = Intent(
                     Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES,
                     Uri.fromParts("package", packageName, null)
@@ -628,6 +394,202 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    // ------------------------------------------------------------------
+    // UI states
+    // ------------------------------------------------------------------
+
+    /** Starts a looping decorative animation, unless one runs already or animations are turned off. */
+    private fun animate(view: View, @AnimRes anim: Int) {
+        if (view.animation == null && ValueAnimator.areAnimatorsEnabled()) {
+            view.startAnimation(AnimationUtils.loadAnimation(this, anim))
+        }
+    }
+
+    private fun showIdlePanel() {
+        errorShown = false
+        ivRingScanner.clearAnimation()
+        ivRingDashed.clearAnimation()
+        progressPanel.visibility = View.GONE
+        idlePanel.visibility = View.VISIBLE
+        animate(ivMainRingScanner, R.anim.rotate_cw)
+        animate(ivMainRingDashed, R.anim.rotate_ccw)
+        // Reset header back to its ready/online state
+        ivPhaseIcon.setImageResource(R.drawable.ic_package)
+        tvPhase.text = getVersionChipText()
+        tvPhase.setTextColor(getColor(R.color.kali_blue))
+        setLiveIndicator(R.string.main_ready_label, R.color.valid_green)
+        btnInstall.visibility = View.GONE
+        btnCancel.text = getString(android.R.string.cancel)
+    }
+
+    /** Swaps to the progress panel with the live header; shared by every non-idle state. */
+    private fun showProgressPanel() {
+        errorShown = false
+        ivMainRingScanner.clearAnimation()
+        ivMainRingDashed.clearAnimation()
+        idlePanel.visibility = View.GONE
+        progressPanel.visibility = View.VISIBLE
+        animate(ivRingScanner, R.anim.rotate_cw)
+        animate(ivRingDashed, R.anim.rotate_ccw)
+        tvPhase.setTextColor(getColor(R.color.kali_blue))
+        setLiveIndicator(R.string.live_label, R.color.valid_green)
+        btnInstall.visibility = View.GONE
+        btnCancel.text = getString(android.R.string.cancel)
+    }
+
+    private fun setLiveIndicator(labelRes: Int, colorRes: Int) {
+        tvLive.text = getString(labelRes)
+        tvLive.setTextColor(getColor(colorRes))
+        mainStatusDot.setBackgroundResource(R.drawable.status_dot)
+        mainStatusDot.backgroundTintList = ColorStateList.valueOf(getColor(colorRes))
+        mainStatusDot.alpha = 1f
+        animate(mainStatusDot, R.anim.blink)
+    }
+
+    private fun showDownloadingPanel(pending: PendingDownload) {
+        showProgressPanel()
+
+        progressBar.isIndeterminate = false
+        circular.isIndeterminate = false
+        circular.setProgressCompat(0, false)
+        progressBar.progress = 0
+        tvPercent.text   = getString(R.string.percent_format, 0)
+        tvSpeed.text     = getString(R.string.dash)
+        tvSize.text      = getString(R.string.dash)
+        tvRemaining.text = getString(R.string.dash)
+
+        ivPhaseIcon.setImageResource(R.drawable.ic_download)
+        tvPhase.text = getString(
+            if (pending.isSelfUpdate) R.string.phase_updating else R.string.phase_downloading
+        )
+        tvStatus.text = if (pending.isSelfUpdate && !pending.targetLabel.isNullOrBlank()) {
+            getString(R.string.status_updating, pending.targetLabel)
+        } else {
+            getString(R.string.status_connecting)
+        }
+        tvStatusHint.text = getString(
+            if (pending.isSelfUpdate) R.string.status_hint_update else R.string.status_hint_connect
+        )
+
+        lastPollBytes = -1L
+        speedBps = 0.0
+    }
+
+    private fun showProgress(pending: PendingDownload, status: DownloadStatus) {
+        val total = status.totalBytes
+        val downloaded = status.downloadedBytes
+
+        // Fail early instead of after hundreds of MB
+        if (total > 0 && spaceCheckedFor != pending.downloadId) {
+            spaceCheckedFor = pending.downloadId
+            val needed = downloads.spaceShortfall(status)
+            if (needed != null) {
+                stopPolling()
+                downloads.cancel()
+                showErrorState(getString(R.string.error_no_space, formatBytes(needed)))
+                return
+            }
+        }
+
+        val now = SystemClock.elapsedRealtime()
+        if (!status.isRunning) {
+            speedBps = 0.0
+        } else if (lastPollBytes in 0..downloaded && now > lastPollTime) {
+            val instant = (downloaded - lastPollBytes) * 1000.0 / (now - lastPollTime)
+            speedBps = if (speedBps <= 0.0) instant else speedBps * 0.7 + instant * 0.3
+        }
+        lastPollBytes = downloaded
+        lastPollTime = now
+
+        if (total > 0) {
+            val permille = (downloaded * 1000 / total).toInt().coerceIn(0, 999)
+            progressBar.isIndeterminate = false
+            circular.isIndeterminate = false
+            progressBar.progress = permille
+            circular.setProgressCompat(permille, true)
+            tvPercent.text = getString(R.string.percent_format, permille / 10)
+            tvSize.text = getString(R.string.size_format, formatBytes(downloaded), formatBytes(total))
+        } else {
+            progressBar.isIndeterminate = true
+            tvPercent.text = getString(R.string.dash)
+            tvSize.text = formatBytes(downloaded)
+        }
+
+        if (status.isPaused) {
+            setLiveIndicator(R.string.offline_label, R.color.text_secondary)
+        } else {
+            setLiveIndicator(R.string.live_label, R.color.valid_green)
+        }
+        tvStatus.text = when {
+            status.isPaused -> getString(R.string.status_waiting)
+            pending.isSelfUpdate && !pending.targetLabel.isNullOrBlank() ->
+                getString(R.string.status_updating, pending.targetLabel)
+            total <= 0 -> getString(R.string.status_connecting)
+            else -> getString(R.string.status_downloading)
+        }
+        tvStatusHint.text = getString(
+            when {
+                status.isPaused -> R.string.status_hint_waiting
+                pending.isSelfUpdate -> R.string.status_hint_update
+                total <= 0 -> R.string.status_hint_connect
+                else -> R.string.status_hint_download
+            }
+        )
+        tvSpeed.text = if (status.isRunning) {
+            getString(R.string.speed_format, speedBps / (1024.0 * 1024.0))
+        } else {
+            getString(R.string.dash)
+        }
+        tvRemaining.text = if (status.isRunning && total > 0 && speedBps > 0) {
+            formatRemaining(((total - downloaded) / speedBps).toLong())
+        } else {
+            formatRemaining(-1)
+        }
+    }
+
+    private fun showVerifyingPanel() {
+        showProgressPanel()
+        progressBar.isIndeterminate = false
+        progressBar.progress = 1000
+        circular.setProgressCompat(1000, false)
+        tvPercent.text    = getString(R.string.percent_format, 100)
+        tvSpeed.text      = getString(R.string.dash)
+        tvRemaining.text  = getString(R.string.dash)
+        ivPhaseIcon.setImageResource(R.drawable.ic_package)
+        tvPhase.text      = getString(R.string.phase_verifying)
+        tvStatus.text     = getString(R.string.status_verifying)
+        tvStatusHint.text = getString(R.string.status_hint_verify)
+    }
+
+    private fun showReadyPanel(apkBytes: Long) {
+        showVerifyingPanel()
+        ivRingScanner.clearAnimation()
+        ivRingDashed.clearAnimation()
+        tvSize.text       = getString(R.string.size_format, formatBytes(apkBytes), formatBytes(apkBytes))
+        tvPhase.text      = getString(R.string.phase_ready)
+        tvStatus.text     = getString(R.string.status_ready)
+        tvStatusHint.text = getString(R.string.status_hint_ready)
+        btnInstall.visibility = View.VISIBLE
+    }
+
+    private fun showErrorState(message: String?) {
+        showProgressPanel()
+        errorShown = true
+        ivRingScanner.clearAnimation()
+        ivRingDashed.clearAnimation()
+        setLiveIndicator(R.string.failed_label, R.color.invalid_red)
+        mainStatusDot.clearAnimation()
+        ivPhaseIcon.setImageResource(R.drawable.ic_package)
+        tvPhase.text       = getString(R.string.phase_error)
+        tvPhase.setTextColor(getColor(R.color.invalid_red))
+        tvStatus.text      = message ?: getString(R.string.error_unknown)
+        tvStatusHint.text  = getString(R.string.status_hint_error)
+        tvSpeed.text       = getString(R.string.dash)
+        tvRemaining.text   = getString(R.string.dash)
+        btnCancel.text     = getString(android.R.string.ok)
+    }
+
+    // Same number formatting as the speed and percent strings: the user's locale
     private fun formatBytes(bytes: Long): String {
         if (bytes <= 0) return "0 B"
         val units = arrayOf("B", "KB", "MB", "GB")
@@ -638,9 +600,9 @@ class MainActivity : AppCompatActivity() {
             unitIdx++
         }
         return if (unitIdx == 0) {
-            String.format(Locale.US, "%d %s", value.toLong(), units[unitIdx])
+            String.format(Locale.getDefault(), "%d %s", value.toLong(), units[unitIdx])
         } else {
-            String.format(Locale.US, "%.1f %s", value, units[unitIdx])
+            String.format(Locale.getDefault(), "%.1f %s", value, units[unitIdx])
         }
     }
 
@@ -649,11 +611,5 @@ class MainActivity : AppCompatActivity() {
         seconds == 0L -> getString(R.string.dash)
         seconds < 60  -> getString(R.string.remaining_seconds, seconds)
         else          -> getString(R.string.remaining_minutes, seconds / 60, seconds % 60)
-    }
-
-    override fun onDestroy() {
-        super.onDestroy()
-        updateCheckThread?.interrupt()
-        cancelActiveDownload()
     }
 }
