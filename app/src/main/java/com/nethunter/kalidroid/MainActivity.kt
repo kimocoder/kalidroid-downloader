@@ -505,6 +505,7 @@ class MainActivity : AppCompatActivity() {
             tvSize.text = getString(R.string.size_format, formatBytes(downloaded), formatBytes(total))
         } else {
             progressBar.isIndeterminate = true
+            circular.isIndeterminate = true
             tvPercent.text = getString(R.string.dash)
             tvSize.text = formatBytes(downloaded)
         }

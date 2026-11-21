@@ -48,7 +48,7 @@ jobs:
           KALIDROID_KEYSTORE_PASSWORD: ${{ secrets.KALIDROID_KEYSTORE_PASSWORD }}
           KALIDROID_KEY_ALIAS: ${{ secrets.KALIDROID_KEY_ALIAS }}
           KALIDROID_KEY_PASSWORD: ${{ secrets.KALIDROID_KEY_PASSWORD }}
-        run: ./gradlew testDebugUnitTest assembleRelease
+        run: ./gradlew testDebugUnitTest lintDebug assembleRelease
 
       - name: Write update manifest
         run: |
