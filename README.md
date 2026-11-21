@@ -1,7 +1,7 @@
 # kalidroid-downloader
 
 The KaliDroid online installer: a small Android app that downloads the KaliDroid
-`setup.apk` (about 340 MB) from `https://kalidroid.com/setup.apk`, checks it, and hands
+`setup.apk` (about 370 MB) from `https://kalidroid.com/kalidroid/setup.apk`, checks it, and hands
 it to the system package installer. It also keeps itself up to date from this repo's
 GitHub releases.
 

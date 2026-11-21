@@ -38,7 +38,7 @@ import java.util.Locale
 class MainActivity : AppCompatActivity() {
 
     companion object {
-        private const val APK_URL = "https://kalidroid.com/setup.apk"
+        private const val APK_URL = "https://kalidroid.com/kalidroid/setup.apk"
         private const val FILE_PROVIDER_AUTHORITY = "com.nethunter.kalidroid.provider"
         private const val POLL_INTERVAL_MS = 500L
     }
@@ -482,13 +482,7 @@ class MainActivity : AppCompatActivity() {
         // Fail early instead of after hundreds of MB
         if (total > 0 && spaceCheckedFor != pending.downloadId) {
             spaceCheckedFor = pending.downloadId
-            val needed = downloads.spaceShortfall(status)
-            if (needed != null) {
-                stopPolling()
-                downloads.cancel()
-                showErrorState(getString(R.string.error_no_space, formatBytes(needed)))
-                return
-            }
+            checkFreeSpace(pending, status)
         }
 
         val now = SystemClock.elapsedRealtime()
@@ -545,6 +539,23 @@ class MainActivity : AppCompatActivity() {
         } else {
             formatRemaining(-1)
         }
+    }
+
+    /**
+     * Checks free space off the main thread: [ApkDownloads.spaceShortfall] calls
+     * StorageManager.getAllocatableBytes, which is worker-thread work.
+     */
+    private fun checkFreeSpace(pending: PendingDownload, status: DownloadStatus) {
+        Thread {
+            val needed = downloads.spaceShortfall(status) ?: return@Thread
+            handler.post {
+                if (polling && downloads.load()?.downloadId == pending.downloadId) {
+                    stopPolling()
+                    downloads.cancel()
+                    showErrorState(getString(R.string.error_no_space, formatBytes(needed)))
+                }
+            }
+        }.start()
     }
 
     private fun showVerifyingPanel() {
