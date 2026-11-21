@@ -563,6 +563,7 @@ class MainActivity : AppCompatActivity() {
         showProgressPanel()
         progressBar.isIndeterminate = false
         progressBar.progress = 1000
+        circular.isIndeterminate = false
         circular.setProgressCompat(1000, false)
         tvPercent.text    = getString(R.string.percent_format, 100)
         tvSpeed.text      = getString(R.string.dash)
@@ -586,6 +587,8 @@ class MainActivity : AppCompatActivity() {
 
     private fun showErrorState(message: String?) {
         showProgressPanel()
+        progressBar.isIndeterminate = false
+        circular.isIndeterminate = false
         errorShown = true
         ivRingScanner.clearAnimation()
         ivRingDashed.clearAnimation()
