@@ -1,0 +1,83 @@
+name: Apply Signing Lineage
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+# Keep this in the same group as build.yml so an APK and its manifest are never
+# published while another release job is running.
+concurrency:
+  group: rolling-release
+  cancel-in-progress: false
+
+jobs:
+  lineage:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Decode keystores
+        env:
+          RELEASE_KEYSTORE_BASE64: ${{ secrets.KALIDROID_KEYSTORE_BASE64 }}
+          OLD_DEBUG_KEYSTORE_BASE64: ${{ secrets.KALIDROID_OLD_DEBUG_KEYSTORE_BASE64 }}
+        run: |
+          set -euo pipefail
+          if [ -z "$RELEASE_KEYSTORE_BASE64" ] || [ -z "$OLD_DEBUG_KEYSTORE_BASE64" ]; then
+            echo "::error::KALIDROID_KEYSTORE_BASE64 and KALIDROID_OLD_DEBUG_KEYSTORE_BASE64 must both be set"
+            exit 1
+          fi
+          echo "$RELEASE_KEYSTORE_BASE64" | base64 -d > "$RUNNER_TEMP/release.jks"
+          echo "$OLD_DEBUG_KEYSTORE_BASE64" | base64 -d > "$RUNNER_TEMP/old-debug.jks"
+          chmod 600 "$RUNNER_TEMP/release.jks" "$RUNNER_TEMP/old-debug.jks"
+
+      - name: Download current release
+        run: |
+          set -euo pipefail
+          curl -fsSL --retry 3 -o kalidroid.apk "https://github.com/${{ github.repository }}/releases/download/latest/kalidroid.apk"
+          curl -fsSL --retry 3 -o version.json "https://github.com/${{ github.repository }}/releases/download/latest/version.json"
+
+      - name: Generate lineage and re-sign
+        env:
+          KALIDROID_KEYSTORE_PASSWORD: ${{ secrets.KALIDROID_KEYSTORE_PASSWORD }}
+          KALIDROID_KEY_PASSWORD: ${{ secrets.KALIDROID_KEY_PASSWORD }}
+          KALIDROID_KEY_ALIAS: ${{ secrets.KALIDROID_KEY_ALIAS }}
+        run: |
+          set -euo pipefail
+          BUILD_TOOLS=$(ls -d "$ANDROID_HOME"/build-tools/* | sort -V | tail -1)
+          APKSIGNER="$BUILD_TOOLS/apksigner"
+
+          "$APKSIGNER" rotate --out lineage.bin \
+            --old-signer --ks "$RUNNER_TEMP/old-debug.jks" \
+              --ks-key-alias androiddebugkey \
+              --ks-pass pass:android --key-pass pass:android \
+            --new-signer --ks "$RUNNER_TEMP/release.jks" \
+              --ks-key-alias "$KALIDROID_KEY_ALIAS" \
+              --ks-pass env:KALIDROID_KEYSTORE_PASSWORD \
+              --key-pass env:KALIDROID_KEY_PASSWORD
+
+          "$APKSIGNER" sign \
+            --ks "$RUNNER_TEMP/release.jks" \
+            --ks-key-alias "$KALIDROID_KEY_ALIAS" \
+            --ks-pass env:KALIDROID_KEYSTORE_PASSWORD \
+            --key-pass env:KALIDROID_KEY_PASSWORD \
+            --lineage lineage.bin \
+            --in kalidroid.apk \
+            --out kalidroid-lineage.apk
+
+          "$APKSIGNER" verify --verbose --print-certs kalidroid-lineage.apk
+          mv kalidroid-lineage.apk kalidroid.apk
+
+          NEW_SHA=$(sha256sum kalidroid.apk | cut -d' ' -f1)
+          NEW_SIZE=$(stat -c %s kalidroid.apk)
+          jq --arg sha "$NEW_SHA" --argjson size "$NEW_SIZE" \
+            '.sha256 = $sha | .size = $size' version.json > version.json.new
+          mv version.json.new version.json
+          cat version.json
+
+      - name: Publish lineage-signed APK
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          gh release upload latest kalidroid.apk --clobber
+          gh release upload latest version.json --clobber
